@@ -1,8 +1,8 @@
+import '../src/legacy/verbatim-runtime.js';
 import panelCss from '../src/ui/styles.css?inline';
 import { ensureEntryButton, removeEntryButton } from '../src/core/dom/button';
-import { pickPanel } from '../src/core/dom/panel';
-import { createPanelSession } from '../src/core/dom/panel-session';
-import { scrapePanel } from '../src/core/dom/scrape';
+import { extractTranscriptLegacy } from '../src/core/dom/legacy';
+import { installShadowCapture } from '../src/core/dom/shadow';
 import { harvestTranscript } from '../src/core/harvest/chain';
 import { installTimedTextHook } from '../src/core/harvest/intercept';
 import { readTitle, readVideoId } from '../src/core/harvest/player';
@@ -22,8 +22,8 @@ import { createOverlay } from '../src/ui/overlay';
   'use strict';
 
   const win = window;
+  installShadowCapture(window);
   const LANGS = defaultLangs();
-  const panelSession = createPanelSession(document);
   const hook = installTimedTextHook(win);
 
   const session = createSession({
@@ -36,16 +36,15 @@ import { createOverlay } from '../src/ui/overlay';
           log,
           onStage,
           remote: () => runRemoteSources({ win, ctx: { videoId, langs: LANGS, signal, log } }),
+          cachedIntercept: () =>
+            runInterceptSource({ videoId, langs: LANGS, signal, log }, hook, 0),
           intercept: (timeoutMs) =>
             runInterceptSource({ videoId, langs: LANGS, signal, log }, hook, timeoutMs),
-          openPanel: panelSession.openPanel,
-          closePanel: panelSession.closePanel,
-          dom: async (panel) => {
-            const target = (panel as Element | null) ?? pickPanel(document);
-            if (!target) return null;
-            const scraped = await scrapePanel(target);
-            if (scraped.lines.length === 0) return null;
-            return { lines: scraped.lines, source: 'dom', showTimestamps: scraped.showTimestamps };
+          dom: async () => {
+            // 1.x 原版流程逐行移植：面板由它自己打开/收回，不再由兜底链并行触发
+            const result = await extractTranscriptLegacy(document);
+            if (result.lines.length === 0) return null;
+            return { lines: result.lines, source: 'dom', showTimestamps: result.showTimestamps };
           },
         }),
     },
@@ -71,6 +70,14 @@ import { createOverlay } from '../src/ui/overlay';
       onClick: () => overlay.toggle(),
     });
   };
+
+  // 用户手动点开 YouTube 的 Transcript 标签页时，页面会自己发 get_transcript。
+  // 截获后立刻自动重载，不需要再点「重试」。
+  hook.onCapture((capture) => {
+    if (capture.kind !== 'get_transcript') return;
+    if (session.store.getState().status !== 'error') return;
+    void session.load(true);
+  });
 
   let lastUrl = '';
 

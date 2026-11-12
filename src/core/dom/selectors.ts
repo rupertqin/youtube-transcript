@@ -16,8 +16,11 @@ export const DEFAULT_SELECTORS: SelectorSet = {
   mastheadEnd: 'ytd-masthead #end',
   panels: [
     'ytd-transcript-search-panel-renderer',
-    // engagement-panel-transcript / engagement-panel-searchable-transcript 都要命中
-    'ytd-engagement-panel-section-list-renderer[target-id*="transcript"]',
+    // 2026 版的面板本体；行内容在它的 shadow root 里
+    'yt-engagement-panel-section-list-view-model',
+    'ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-transcript"]',
+    // 2026 版把 target-id 改成了 engagement-panel-searchable-transcript
+    'ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-searchable-transcript"]',
     '[role="dialog"] ytd-transcript-segment-list-renderer',
   ].join(','),
   list: 'ytd-transcript-segment-list-renderer',

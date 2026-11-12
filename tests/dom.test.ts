@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { collapseDuplicates } from '../src/core/dom/dedupe';
 import { countTimecodes, parseTimecodeRows } from '../src/core/dom/text-rows';
-import { looksLikeTranscript } from '../src/core/dom/scrape';
+import { looksLikeTranscript } from '../src/core/lines';
+import { collectFromShape } from '../src/core/dom/scrape';
+import { cacheKey } from '../src/core/cache';
 import { parseTimecode } from '../src/core/dom/scrape';
 import { applySelectorOverrides, DEFAULT_SELECTORS, getSelectors, resetSelectors } from '../src/core/dom/selectors';
 import type { TranscriptLine } from '../src/core/types';
@@ -101,6 +103,11 @@ describe('兜底文本的合法性校验', () => {
   it('空数组不算字幕', () => {
     expect(looksLikeTranscript([])).toBe(false);
   });
+
+  it('只有面板标题的 1~2 行不算字幕（这条脏数据曾进了缓存）', () => {
+    expect(looksLikeTranscript([row('Transcript')])).toBe(false);
+    expect(looksLikeTranscript([row('Transcript'), row('Chapters')])).toBe(false);
+  });
 });
 
 describe('重复字幕兜底', () => {
@@ -149,5 +156,39 @@ describe('选择器覆盖', () => {
     resetSelectors();
     expect(applySelectorOverrides('bad')).toEqual([]);
     expect(getSelectors()).toEqual(DEFAULT_SELECTORS);
+  });
+});
+
+describe('缓存键', () => {
+  it('带结构版本前缀：判定规则一改，旧条目自动失效', () => {
+    expect(cacheKey('abcdefghijk')).toMatch(/^v\d+\|abcdefghijk\|na\|manual$/u);
+    expect(cacheKey('abcdefghijk', 'en', 'asr')).toMatch(/\|en\|asr$/u);
+  });
+});
+
+describe('结构签名读取（与标签名无关）', () => {
+  const fakeList = (rows: string[]) => ({ children: rows.map((text) => ({ textContent: text })) }) as unknown as Element;
+
+  it('按「时间码 + 正文」逐行读出来', () => {
+    const result = collectFromShape(
+      fakeList(['0:17 Rails 2026 is set in Austin', '0:25 Let me start with why', '1:02:03 late line']),
+    );
+    expect(result.lines).toEqual([
+      { start: 17000, dur: 0, text: 'Rails 2026 is set in Austin' },
+      { start: 25000, dur: 0, text: 'Let me start with why' },
+      { start: 3723000, dur: 0, text: 'late line' },
+    ]);
+    expect(result.showTimestamps).toBe(true);
+  });
+
+  it('推荐列表那种「标题开头」的行一条都不收', () => {
+    const result = collectFromShape(
+      fakeList(['Rethinking HEY backend with agents 30:24', 'DHH off the rails 6:44']),
+    );
+    expect(result.lines).toEqual([]);
+  });
+
+  it('没有时间码的行跳过，不产生假数据', () => {
+    expect(collectFromShape(fakeList(['Transcript', 'Chapters'])).lines).toEqual([]);
   });
 });

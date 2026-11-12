@@ -40,6 +40,7 @@ export default defineConfig({
   publicDir: false,
   define: {
     'process.env.NODE_ENV': '"production"',
+    __YTT_VERSION__: JSON.stringify(pkg.version),
   },
   build: {
     outDir: 'dist/userscript',

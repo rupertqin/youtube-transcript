@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { detectFormat, parseJson3, parseSrv, parseTimedText, parseVtt } from '../src/core/harvest/parse';
 import {
   buildTimedTextUrl,
@@ -6,7 +6,14 @@ import {
   videoIdFromTimedTextUrl,
 } from '../src/core/harvest/timedtext';
 import { pickTrack } from '../src/core/harvest/player';
+import { videoIdFromLocation } from '../src/core/harvest/intercept';
 import { parseGetTranscript, videoIdFromGetTranscriptBody } from '../src/core/harvest/parse/transcript';
+import {
+  buildGetTranscriptParams,
+  fetchGetTranscript,
+  findTranscriptParamsInHtml,
+  getGetTranscriptDiagnostic,
+} from '../src/core/harvest/get-transcript';
 
 describe('json3 解析', () => {
   const raw = JSON.stringify({
@@ -216,5 +223,98 @@ describe('get_transcript（原生面板走的 InnerTube 接口）', () => {
     expect(videoIdFromGetTranscriptBody('{"videoId":"dQw4w9WgXcQ","params":"abc"}')).toBe('dQw4w9WgXcQ');
     expect(videoIdFromGetTranscriptBody('params=abc')).toBeNull();
     expect(videoIdFromGetTranscriptBody(undefined)).toBeNull();
+  });
+});
+
+describe('get_transcript params 编码', () => {
+  function b64ToBytes(value: string): number[] {
+    return [...atob(value)].map((ch) => ch.charCodeAt(0));
+  }
+
+  it('外层 = {1: videoId, 2: base64(内层)}，内层 = {1: asr, 3: lang, 5: ""}', () => {
+    const params = buildGetTranscriptParams('dQw4w9WgXcQ', 'en');
+    const outer = b64ToBytes(params);
+
+    // field1: 0x0a len=11 videoId
+    expect(outer[0]).toBe(0x0a);
+    expect(outer[1]).toBe(11);
+    expect(String.fromCharCode(...outer.slice(2, 13))).toBe('dQw4w9WgXcQ');
+
+    // field2: 0x12 len=N base64(内层)
+    expect(outer[13]).toBe(0x12);
+    const innerLen = outer[14];
+    const innerB64 = String.fromCharCode(...outer.slice(15, 15 + innerLen));
+    const inner = b64ToBytes(innerB64);
+    expect(inner.slice(0, 5)).toEqual([0x0a, 3, 0x61, 0x73, 0x72]); // "asr"
+    expect(inner.slice(5, 9)).toEqual([0x1a, 2, 0x65, 0x6e]); // "en"
+    expect(inner.slice(9)).toEqual([0x2a, 0]); // field5 空串
+  });
+});
+
+describe('get_transcript 直连的失败可见性', () => {
+  it('ytcfg 读不到时仍会尝试静态客户端上下文，并把原因写进诊断', async () => {
+    const fetchFn = vi.fn(async () => ({ ok: true, text: async () => '{}' }) as Response);
+    const win = {} as Window;
+
+    await expect(
+      fetchGetTranscript({
+        win,
+        fetchFn: fetchFn as unknown as typeof fetch,
+        videoId: 'dQw4w9WgXcQ',
+        langs: ['en'],
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow(/get_transcript/u);
+
+    // 不能像之前那样 0ms 静默退出：至少要把静态上下文都试一遍
+    expect(fetchFn.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(getGetTranscriptDiagnostic()).toContain('get_transcript 失败');
+  });
+});
+
+describe('用 YouTube 页面自带的 params', () => {
+  const real = 'CgtEQTEyMzQ1Njc4OXABCgNhcnIQAxoDZW5HKgA%3D';
+
+  it('从 HTML 里的 getTranscriptEndpoint 取出 params', () => {
+    const html = `<script>var ytInitialData = {"engagementPanels":[{"getTranscriptEndpoint":{"params":"${real}"}}]};</script>`;
+    expect(findTranscriptParamsInHtml(html)).toEqual([real]);
+  });
+
+  it('请求时优先使用页面自带的 params，而不是自己拼的 protobuf', async () => {
+    const fetchFn = vi.fn(
+      async (_url: string, _init?: RequestInit) =>
+        ({ ok: false, status: 400, text: async () => 'INVALID_ARGUMENT' }) as Response,
+    );
+    const win = {
+      ytInitialData: { getTranscriptEndpoint: { params: real } },
+    } as unknown as Window;
+
+    await expect(
+      fetchGetTranscript({
+        win,
+        fetchFn: fetchFn as unknown as typeof fetch,
+        videoId: 'dQw4w9WgXcQ',
+        langs: ['en'],
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow(/get_transcript/u);
+
+    const firstBody = JSON.parse((fetchFn.mock.calls[0][1] as RequestInit).body as string);
+    expect(firstBody.params).toBe(real);
+    expect(getGetTranscriptDiagnostic()).toContain('HTTP 400');
+    expect(getGetTranscriptDiagnostic()).toContain('INVALID_ARGUMENT');
+  });
+});
+
+describe('get_transcript 捕获的视频归属', () => {
+  it('POST body 里没有 videoId，改从当前页 URL 取', () => {
+    const win = (href: string) => ({ location: { href } }) as unknown as Window;
+    expect(videoIdFromLocation(win('https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=10s'))).toBe(
+      'dQw4w9WgXcQ',
+    );
+    expect(videoIdFromLocation(win('https://www.youtube.com/shorts/dQw4w9WgXcQ'))).toBe(
+      'dQw4w9WgXcQ',
+    );
+    expect(videoIdFromLocation(win('https://www.youtube.com/'))).toBeNull();
   });
 });

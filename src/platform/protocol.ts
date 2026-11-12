@@ -6,7 +6,8 @@ export const BRIDGE_CHANNEL = 'ytt-bridge-v1';
 export type BridgeRequest =
   | { type: 'PING' }
   | { type: 'HARVEST_REMOTE'; videoId: string; langs: string[] }
-  | { type: 'WAIT_TIMEDTEXT'; videoId: string; timeoutMs: number };
+  | { type: 'WAIT_TIMEDTEXT'; videoId: string; timeoutMs: number }
+  | { type: 'GET_TRANSCRIPT'; videoId: string; langs: string[] };
 
 export interface BridgeRemotePayload {
   lines: { start: number; dur: number; text: string }[];

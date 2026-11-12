@@ -9,6 +9,7 @@ import {
 import type { ExportFormat, PanelState } from '../core/types';
 import type { TranscriptClient } from '../platform/types';
 import { clear, h, show } from './dom';
+import { dumpPageStructure } from '../core/dom/dump';
 import { renderEmptyState, type EmptyKind } from './empty-state';
 import { createHeader } from './header';
 import { SOURCE_LABEL } from './labels';
@@ -214,7 +215,7 @@ export function createPanel(options: PanelOptions): PanelHandle {
     else if (state.status === 'loading' || state.status === 'idle') kind = 'loading';
     else if (state.status === 'error') kind = 'error';
 
-    const key = `${kind}|${state.error?.code ?? ''}|${state.error?.detail ?? ''}|${needle}|${state.progress ?? ''}`;
+    const key = `${kind}|${state.error?.code ?? ''}|${state.error?.detail ?? ''}|${needle}|${state.progress ?? ''}|${state.diagnostic ?? ''}`;
     if (key === emptyKey) return;
     emptyKey = key;
 
@@ -226,7 +227,9 @@ export function createPanel(options: PanelOptions): PanelHandle {
         detail: state.error?.detail,
         needle,
         progress: state.progress,
+        diagnostic: state.diagnostic,
         onRetry: () => void client.load(true),
+        onDump: async () => copyText(dumpPageStructure(document)),
         onClearSearch: () => applyQuery(''),
       }),
     );

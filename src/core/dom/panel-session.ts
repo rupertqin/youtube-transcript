@@ -1,4 +1,4 @@
-import { closeTranscriptPanel, openTranscriptPanel, pickPanel } from './panel';
+import { closeTranscriptPanel, countSegments, openTranscriptPanel, pickPanel } from './panel';
 
 export interface PanelSession {
   openPanel(): Promise<Element | null>;
@@ -16,8 +16,12 @@ export function createPanelSession(doc: Document, waitMs = 2500): PanelSession {
 
   return {
     openPanel() {
+      // 只有「已经含片段」的面板才算真的开着。空壳（只有标题、没有行）必须
+      // 走 openTranscriptPanel 去点 Show transcript —— 之前这里只要有面板就短路，
+      // 触发器永远不会被点，这就是「原版 Copy Transcript 能拿到、新版拿不到」的分歧点：
+      // 原版流程直接调 openTranscriptPanel，没有这层短路。
       const existing = pickPanel(doc);
-      if (existing) return Promise.resolve(existing);
+      if (existing && countSegments(existing) > 0) return Promise.resolve(existing);
       openedByUs = true;
       return openTranscriptPanel(doc, { waitMs });
     },

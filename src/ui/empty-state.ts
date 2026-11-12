@@ -12,7 +12,11 @@ export interface EmptyOptions {
   needle?: string;
   /** 抓取阶段提示，例如「正在打开原生字幕面板」 */
   progress?: string | null;
+  /** DOM 抓取失败时的面板结构快照 */
+  diagnostic?: string | null;
   onRetry?: () => void;
+  /** 把真实页面结构复制到剪贴板，用于一次性定位选择器 */
+  onDump?: () => Promise<boolean>;
   onClearSearch?: () => void;
 }
 
@@ -100,6 +104,17 @@ export function renderEmptyState(options: EmptyOptions): HTMLElement {
     );
   }
 
+  if (options.diagnostic) {
+    children.push(
+      h('pre', {
+        class:
+          'ytd-diag mt-1 max-h-[220px] w-full select-text overflow-auto rounded-lg border border-[var(--ytt-border)] ' +
+          'bg-[var(--ytt-surface)] p-2 text-left font-mono text-[9.5px] leading-[1.5] text-[var(--ytt-text-mute)]',
+        text: options.diagnostic,
+      }),
+    );
+  }
+
   if (options.onRetry) {
     children.push(
       h(
@@ -113,6 +128,24 @@ export function renderEmptyState(options: EmptyOptions): HTMLElement {
         [icon('refresh', 12), '重试'],
       ),
     );
+  }
+
+  if (options.onDump) {
+    const dumpBtn = h(
+      'button',
+      {
+        class:
+          'mt-1 inline-flex items-center gap-1.5 rounded-lg border border-[var(--ytt-border-strong)] px-3 py-1.5 text-[12px] font-medium text-[var(--ytt-text)] transition hover:bg-[var(--ytt-hover)] active:scale-[0.98]',
+        attrs: { type: 'button' },
+      },
+      [icon('copy', 12), '复制页面结构'],
+    );
+    dumpBtn.addEventListener('click', async () => {
+      const ok = await options.onDump!();
+      dumpBtn.replaceChildren(icon(ok ? 'check' : 'close', 12), ok ? '已复制，粘贴给我' : '复制失败');
+      setTimeout(() => dumpBtn.replaceChildren(icon('copy', 12), '复制页面结构'), 3000);
+    });
+    children.push(dumpBtn);
   }
 
   return h('div', { class: 'flex h-full flex-col items-center justify-center gap-3 px-6 py-8 text-center' }, children);

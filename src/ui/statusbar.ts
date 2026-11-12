@@ -46,10 +46,17 @@ export function createStatusBar(): StatusBarHandle {
   });
   show(popover, false);
 
+  // 版本号常驻底栏：排查时第一件事就是确认装的是哪一版
+  const versionText = h('span', {
+    class: 'shrink-0 text-[9.5px] tabular-nums',
+    text: `v${typeof __YTT_VERSION__ === 'string' ? __YTT_VERSION__ : 'dev'}`,
+  });
+  versionText.style.opacity = '0.65';
+
   const footer = h(
     'footer',
     { class: 'flex h-8 items-center gap-2 px-3 text-[10.5px] text-[var(--ytt-text-mute)]' },
-    [sourceWrap, countWrap, langText, cacheWrap, h('span', { class: 'flex-1' }), diagBtn],
+    [sourceWrap, countWrap, langText, cacheWrap, h('span', { class: 'flex-1' }), versionText, diagBtn],
   );
 
   const element = h('div', { class: 'relative shrink-0 border-t border-[var(--ytt-border)]' }, [popover, footer]);

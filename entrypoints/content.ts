@@ -1,7 +1,6 @@
+import '../src/legacy/verbatim-runtime.js';
 import { ensureEntryButton, removeEntryButton } from '../src/core/dom/button';
-import { pickPanel } from '../src/core/dom/panel';
-import { createPanelSession } from '../src/core/dom/panel-session';
-import { scrapePanel } from '../src/core/dom/scrape';
+import { extractTranscriptLegacy } from '../src/core/dom/legacy';
 import { sleep } from '../src/core/dom/wait';
 import { harvestTranscript } from '../src/core/harvest/chain';
 import { readTitle, readVideoId } from '../src/core/harvest/player';
@@ -28,7 +27,6 @@ export default defineContentScript({
   runAt: 'document_start',
   async main(ctx) {
     const LANGS = defaultLangs();
-    const panelSession = createPanelSession(document);
     const bridge = createBridgeEndpoint(window);
 
     let bridgeReady: Promise<boolean> | null = null;
@@ -80,6 +78,16 @@ export default defineContentScript({
                   return toOutcome(payload);
                 }
               : undefined,
+            cachedIntercept: bridgeUp
+              ? async () => {
+                  const payload = await bridge.request<RemotePayload | null>(
+                    'WAIT_TIMEDTEXT',
+                    { videoId, timeoutMs: 0 },
+                    3000,
+                  );
+                  return toOutcome(payload);
+                }
+              : undefined,
             intercept: bridgeUp
               ? async (timeoutMs) => {
                   const payload = await bridge.request<RemotePayload | null>(
@@ -90,17 +98,13 @@ export default defineContentScript({
                   return toOutcome(payload);
                 }
               : undefined,
-            openPanel: panelSession.openPanel,
-            closePanel: panelSession.closePanel,
-            dom: async (panel) => {
-              const target = (panel as Element | null) ?? pickPanel(document);
-              if (!target) return null;
-              const scraped = await scrapePanel(target);
-              if (scraped.lines.length === 0) return null;
+            dom: async () => {
+              const result = await extractTranscriptLegacy(document);
+              if (result.lines.length === 0) return null;
               return {
-                lines: scraped.lines,
+                lines: result.lines,
                 source: 'dom',
-                showTimestamps: scraped.showTimestamps,
+                showTimestamps: result.showTimestamps,
               };
             },
           });
@@ -178,6 +182,15 @@ export default defineContentScript({
         },
       });
     };
+
+    // MAIN world 的钩子把「YouTube 自己发出了字幕请求」转发过来 → 自动重载
+    bridge.on('CAPTURE', (raw) => {
+      const payload = raw as { kind?: string; videoId?: string | null } | null;
+      if (payload?.kind !== 'get_transcript') return;
+      if (payload.videoId && payload.videoId !== readVideoId(window)) return;
+      if (session.store.getState().status !== 'error') return;
+      void session.load(true);
+    });
 
     session.sync();
     void refreshButton();

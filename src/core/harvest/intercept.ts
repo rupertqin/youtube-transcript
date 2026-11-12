@@ -29,6 +29,8 @@ export interface TimedTextHook {
   latest(videoId?: string): TimedTextCapture | null;
   /** 等待一条属于 videoId 的新响应（会先检查历史捕获） */
   waitFor(videoId: string, timeoutMs: number): Promise<TimedTextCapture | null>;
+  /** 订阅实时捕获：用户手动打开原生面板时，YouTube 会自己发请求 */
+  onCapture(listener: (capture: TimedTextCapture) => void): () => void;
   dispose(): void;
   installedAt: number;
 }
@@ -41,6 +43,17 @@ interface Waiter {
   videoId: string;
   resolve: (capture: TimedTextCapture | null) => void;
   timer: ReturnType<typeof setTimeout>;
+}
+
+/** get_transcript 的 POST body 里没有 videoId（它在 protobuf params 里），只能从当前页 URL 取。 */
+export function videoIdFromLocation(win: Window): string | null {
+  try {
+    const href = win.location?.href ?? '';
+    const match = /[?&]v=([\w-]{11})/u.exec(href) ?? /\/shorts\/([\w-]{11})/u.exec(href);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function requestUrl(input: RequestInfo | URL): string {
@@ -63,6 +76,7 @@ export function installTimedTextHook(win: Window): TimedTextHook {
 
   const store: TimedTextCapture[] = [];
   const waiters = new Set<Waiter>();
+  const listeners = new Set<(capture: TimedTextCapture) => void>();
   const seen = new Set<string>();
 
   const notify = (capture: TimedTextCapture) => {
@@ -86,7 +100,9 @@ export function installTimedTextHook(win: Window): TimedTextHook {
       // get_transcript 的 videoId 在 POST body 里，URL 上认不出来
       videoId:
         kind === 'get_transcript'
-          ? (videoIdFromGetTranscriptBody(bodyHint) ?? videoIdFromTimedTextUrl(url))
+          ? (videoIdFromGetTranscriptBody(bodyHint) ??
+            videoIdFromLocation(win) ??
+            videoIdFromTimedTextUrl(url))
           : videoIdFromTimedTextUrl(url),
       lang: langFromTimedTextUrl(url),
       text,
@@ -95,6 +111,13 @@ export function installTimedTextHook(win: Window): TimedTextHook {
     store.unshift(capture);
     if (store.length > MAX_CAPTURES) store.pop();
     notify(capture);
+    for (const listener of [...listeners]) {
+      try {
+        listener(capture);
+      } catch {
+        /* 订阅者出错不影响拦截 */
+      }
+    }
   };
 
   const hook: TimedTextHook = {
@@ -118,6 +141,10 @@ export function installTimedTextHook(win: Window): TimedTextHook {
         };
         waiters.add(waiter);
       });
+    },
+    onCapture(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
     },
     dispose() {
       for (const waiter of waiters) {

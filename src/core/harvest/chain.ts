@@ -16,6 +16,8 @@ export interface HarvestDeps {
   closePanel?: (panel: unknown) => void;
   /** ③ 从原生面板 DOM 抓取 */
   dom?: (panel: unknown) => Promise<SourceOutcome | null>;
+  /** ⓪ 先看已经截获的响应（用户此前打开过原生面板时，0ms 命中） */
+  cachedIntercept?: () => Promise<SourceOutcome | null>;
   signal: AbortSignal;
   log: Logger;
   onStage?: (stage: SourceName | 'panel') => void;
@@ -92,12 +94,8 @@ export async function harvestTranscript(deps: HarvestDeps): Promise<HarvestResul
   };
 
   // ② + ④
-  if (deps.remote) {
-    const remote = await step('player', 'NO_CAPTION_TRACK', deps.remote);
-    if (remote) return { ...remote, failures };
-  }
-
-  // ① 与 ③ 共用同一次「打开原生面板」动作：先并发触发，再等拦截
+  // 顺序与 1.x 一致：先打开原生面板读 DOM，读不到再退拦截，最后才去问远程。
+  // ①②④ 已经被 POT 挡住的视频里，DOM 是唯一能出结果的一层，放在最后只会白等。
   let panelPromise: Promise<unknown> = Promise.resolve(null);
   const willOpenPanel = Boolean(deps.openPanel);
   if (deps.openPanel) {
@@ -108,31 +106,37 @@ export async function harvestTranscript(deps: HarvestDeps): Promise<HarvestResul
   }
 
   try {
-    if (deps.intercept) {
-      const intercepted = await step('intercept', 'EMPTY_200', () => deps.intercept!(INTERCEPT_WAIT_MS));
-      if (intercepted) {
-        await panelPromise;
-        return { ...intercepted, failures };
+    // ⓪ 已经截获的 get_transcript / timedtext 响应优先：不等待、不记失败
+    if (deps.cachedIntercept && !deps.signal.aborted) {
+      const cached = await deps.cachedIntercept().catch(() => null);
+      if (cached && cached.lines.length > 0) {
+        deps.log({ code: 'OK', source: 'intercept', ms: 0, meta: { lines: cached.lines.length } });
+        return { ...cached, failures };
       }
     }
 
-    // ③
+    // ③ DOM（原版路径）
     if (deps.dom) {
       const panel = await panelPromise;
       const dom = await step('dom', 'SELECTOR_MISS', () => deps.dom!(panel));
       if (dom) return { ...dom, failures };
     }
 
-    // DOM 等待的那几秒里，面板请求可能刚好被 hook 捕获 —— 最后白拿一次
-    if (deps.intercept && !deps.signal.aborted) {
-      const late = await deps.intercept(0).catch(() => null);
-      if (late && late.lines.length > 0) {
-        deps.log({ code: 'OK', source: 'intercept', ms: 0, meta: { lines: late.lines.length } });
-        return { ...late, failures };
-      }
+    // ① 拦截：面板打开的瞬间播放器/面板自己会发请求，这一步通常能直接命中已捕获的响应
+    if (deps.intercept) {
+      const intercepted = await step('intercept', 'EMPTY_200', () => deps.intercept!(INTERCEPT_WAIT_MS));
+      if (intercepted) return { ...intercepted, failures };
     }
 
-    const lastCode = failures.length > 0 ? failures[failures.length - 1].code : 'NO_CAPTION_TRACK';
+    // ② + ④ 远程
+    if (deps.remote) {
+      const remote = await step('player', 'NO_CAPTION_TRACK', deps.remote);
+      if (remote) return { ...remote, failures };
+    }
+
+    // DOM 是主路径：它因为结构问题失败时优先报它，否则会误报「这个视频没有字幕轨迹」
+    const domStructural = failures.find((item) => item.source === 'dom' && item.code === 'SELECTOR_MISS');
+    const lastCode = domStructural?.code ?? (failures.length > 0 ? failures[failures.length - 1].code : 'NO_CAPTION_TRACK');
     throw new HarvestError(lastCode, failures);
   } finally {
     // 原生面板只是抓取载体：成功、失败、被中断都要收掉，否则页面会同时挂着两套字幕 UI

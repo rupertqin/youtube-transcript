@@ -1,3 +1,4 @@
+import { deepQueryWithin } from './shadow';
 import { getSelectors } from './selectors';
 import { countTimecodes } from './text-rows';
 
@@ -46,7 +47,14 @@ export async function waitForSegments(panel: ParentNode, timeoutMs = 8000): Prom
   const selectors = getSelectors();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (panel.querySelector(selectors.list) || panel.querySelector(selectors.segOld)) return true;
+    if (!(panel instanceof Element)) return false;
+    if (
+      deepQueryWithin(panel, selectors.list).length > 0 ||
+      deepQueryWithin(panel, selectors.segOld).length > 0 ||
+      deepQueryWithin(panel, selectors.segNew).length > 0
+    ) {
+      return true;
+    }
     const text = 'innerText' in panel ? ((panel as HTMLElement).innerText ?? '') : '';
     if (countTimecodes(text) >= 2) return true;
     await sleep(150);

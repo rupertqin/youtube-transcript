@@ -1,6 +1,14 @@
+import { looksLikeTranscript } from '../lines';
 import type { LogEvent, TranscriptLine } from '../types';
 
 export const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * 缓存结构版本。调高即让所有旧条目失效：
+ * v1 曾把「整页文本」当字幕写进来（推荐列表的时长徽标被误认成时间码）；
+ * v2 又写进过「1 行 Transcript」（面板标题被当成唯一一行）。
+ * 每次调整判定规则都必须抬版本，否则修好代码也会一直读到旧脏数据。
+ */
+const CACHE_SCHEMA = 4;
 
 const DB_NAME = 'ytt-cache';
 const DB_VERSION = 1;
@@ -21,7 +29,7 @@ export interface CachedTranscript {
 }
 
 export function cacheKey(videoId: string, lang?: string | null, kind?: string | null): string {
-  return `${videoId}|${lang ?? 'na'}|${kind ?? 'manual'}`;
+  return `v${CACHE_SCHEMA}|${videoId}|${lang ?? 'na'}|${kind ?? 'manual'}`;
 }
 
 function available(): boolean {
@@ -67,22 +75,58 @@ export async function readCacheForVideo(videoId: string): Promise<CachedTranscri
     const tx = db.transaction(STORE_TRANSCRIPTS, 'readonly');
     const all = await promisify(tx.objectStore(STORE_TRANSCRIPTS).getAll() as IDBRequest<CachedTranscript[]>);
     const now = Date.now();
+    const prefix = `v${CACHE_SCHEMA}|`;
     const hit = all
-      .filter((entry) => entry.videoId === videoId && entry.expiresAt > now && entry.lines.length > 0)
+      .filter(
+        (entry) =>
+          entry.videoId === videoId &&
+          entry.key.startsWith(prefix) &&
+          entry.expiresAt > now &&
+          entry.lines.length > 0,
+      )
       .sort((a, b) => (a.kind === 'asr' ? 1 : 0) - (b.kind === 'asr' ? 1 : 0) || b.savedAt - a.savedAt)[0];
-    return hit ?? null;
+    if (!hit) return null;
+
+    // 读的时候再校验一次：旧版本可能写进了「页面文本」
+    if (!looksLikeTranscript(hit.lines)) {
+      await drop(hit.key);
+      console.warn('[ytt] dropped cache entry that does not look like a transcript', hit.key);
+      return null;
+    }
+    return hit;
   } catch (error) {
     console.warn('[ytt] cache read failed', error);
     return null;
   }
 }
 
-export async function writeCache(entry: Omit<CachedTranscript, 'expiresAt'>): Promise<void> {
-  if (!available()) return;
+/** 删除单条缓存（脏数据、过期数据）。 */
+async function drop(key: string): Promise<void> {
   try {
     const db = await openDb();
     const tx = db.transaction(STORE_TRANSCRIPTS, 'readwrite');
-    tx.objectStore(STORE_TRANSCRIPTS).put({ ...entry, expiresAt: Date.now() + CACHE_TTL_MS });
+    tx.objectStore(STORE_TRANSCRIPTS).delete(key);
+  } catch {
+    /* ignore */
+  }
+}
+
+export async function writeCache(entry: Omit<CachedTranscript, 'expiresAt'>): Promise<void> {
+  if (!available()) return;
+  // 写之前把不合法内容挡掉，避免脏数据再存活 7 天
+  if (!looksLikeTranscript(entry.lines)) {
+    console.warn('[ytt] skip caching: lines do not look like a transcript');
+    return;
+  }
+  try {
+    const db = await openDb();
+    const tx = db.transaction(STORE_TRANSCRIPTS, 'readwrite');
+    // key 统一由 cacheKey 生成，避免调用方各写一套格式
+    tx.objectStore(STORE_TRANSCRIPTS).put({
+      ...entry,
+      key: cacheKey(entry.videoId, entry.lang, entry.kind),
+      expiresAt: Date.now() + CACHE_TTL_MS,
+    });
   } catch (error) {
     console.warn('[ytt] cache write failed', error);
   }

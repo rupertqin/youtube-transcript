@@ -1,11 +1,34 @@
+import { deepQueryAll, deepQueryWithin } from './shadow';
 import { getSelectors } from './selectors';
 import { countTimecodes } from './text-rows';
 import { isVisible, sleep, waitForSegments } from './wait';
 
+let triggerInfo = '未尝试';
+
+/** 上一次打开面板的触发器情况（进诊断，用来看「到底点没点开」）。 */
+export function getTriggerInfo(): string {
+  return triggerInfo;
+}
+
+/** 简介默认是折叠的，「Show transcript」按钮可能藏在里面；先点一下展开。 */
+async function expandDescription(doc: Document): Promise<boolean> {
+  const expander =
+    doc.querySelector<HTMLElement>('#description-inline-expander #expand') ??
+    doc.querySelector<HTMLElement>('#expand');
+  if (!expander || !isVisible(expander)) return false;
+  expander.click();
+  await sleep(350);
+  return true;
+}
+
 export function countSegments(root: ParentNode): number {
   const selectors = getSelectors();
-  if (!root.querySelector(selectors.list) && !root.querySelector(selectors.segOld)) return -1;
-  return root.querySelectorAll(`${selectors.segOld},${selectors.segNew}`).length;
+  if (!(root instanceof Element)) return -1;
+  // 新版面板的片段在 shadow root 里，普通 querySelectorAll 看不到
+  if (deepQueryWithin(root, selectors.list).length === 0 && deepQueryWithin(root, selectors.segOld).length === 0) {
+    return -1;
+  }
+  return deepQueryWithin(root, `${selectors.segOld},${selectors.segNew}`).length;
 }
 
 /**
@@ -21,7 +44,7 @@ export function scorePanel(el: Element): number {
 
 export function pickPanel(doc: Document): Element | null {
   const selectors = getSelectors();
-  const all = Array.from(doc.querySelectorAll(selectors.panels));
+  const all = deepQueryAll(doc, selectors.panels);
   const visible = all.filter(isVisible);
   const pool = visible.length ? visible : all;
   if (pool.length === 0) return null;
@@ -29,13 +52,88 @@ export function pickPanel(doc: Document): Element | null {
   return pool[0];
 }
 
+/**
+ * 找 YouTube 自己的「打开字幕」入口。
+ *
+ * 2026 版的入口不一定是个 <button>：可能是简介里的 Show transcript，
+ * 也可能是视频下方那排 chip / tab（Chapters、Transcript…），所以把候选范围放宽到
+ * chip / tab / role=button。必须排除 masthead —— 我们注入的两个按钮文案都带
+ * Transcript，不排除就会点到自己身上。
+ */
+const TRIGGER_SELECTOR =
+  'button, yt-button-shape button, [role="button"], yt-chip-cloud-chip-renderer, yt-tab-shape, tp-yt-paper-chip';
+
+function triggerCandidates(doc: Document): HTMLElement[] {
+  return deepQueryAll(doc, TRIGGER_SELECTOR)
+    .filter((el): el is HTMLElement => el instanceof HTMLElement)
+    .filter(
+      (el) =>
+        el.id !== 'ytt-entry-btn' &&
+        el.id !== 'copy-transcript-btn' &&
+        !el.closest('#ytt-entry-btn, #copy-transcript-btn, ytd-masthead') &&
+        isVisible(el),
+    );
+}
+
+function triggerLabel(el: HTMLElement): string {
+  return (el.textContent || '').replace(/\s+/gu, ' ').trim();
+}
+
 function findTrigger(doc: Document): HTMLElement | null {
-  const buttons = Array.from(doc.querySelectorAll<HTMLElement>('button, yt-button-shape button'));
+  const candidates = triggerCandidates(doc);
   return (
-    buttons.find((b) => /show\s*transcript/iu.test(b.textContent || '')) ||
-    buttons.find((b) => /transcript/iu.test(b.textContent || '')) ||
+    candidates.find((el) => /show\s*transcript/iu.test(triggerLabel(el))) ||
+    // chip / tab 的文案通常就是「Transcript」三个词
+    candidates.find((el) => /^transcript(\b|$)/iu.test(triggerLabel(el))) ||
+    candidates.find((el) => /transcript/iu.test(triggerLabel(el))) ||
     null
   );
+}
+
+/** 页面上所有疑似入口的文案（找不到触发器时写进诊断）。 */
+function describeTriggers(doc: Document): string {
+  const labels = triggerCandidates(doc)
+    .map(triggerLabel)
+    .filter((text) => text.length > 0 && text.length <= 24)
+    .slice(0, 8);
+  return labels.length > 0 ? labels.join(' / ') : '(页面上没有任何可点项)';
+}
+
+/**
+ * 面板顶部有 Chapters / Transcript 两个 tab；停在 Chapters 时字幕行根本不会渲染，
+ * YouTube 也不会去请求字幕数据（拦截层因此也拿不到东西）。
+ *
+ * 新版把 tab 画成了普通 div，所以不能只按标签找：这里按「文本恰好是 Transcript」
+ * 过滤出最深的那层，再向上找可点击的宿主（chip / button / role=tab）去点。
+ */
+function clickTranscriptTab(panel: Element): boolean {
+  const isTarget = (el: Element): boolean => {
+    const text = (el.textContent || '').replace(/\s+/gu, ' ').trim();
+    return text.length > 0 && text.length <= 12 && /^transcript$/iu.test(text);
+  };
+
+  const matches = Array.from(panel.querySelectorAll<HTMLElement>('*')).filter(isTarget);
+  if (matches.length === 0) return false;
+
+  // 最深的才是一次「tab 文案」；它的祖先才是真正的点击目标
+  const deepest = matches.reduce((best, el) => (depth(el) > depth(best) ? el : best), matches[0]);
+  const clickable =
+    (deepest.closest('button, [role="tab"], yt-chip-cloud-chip-renderer, a') as HTMLElement | null) ??
+    deepest;
+
+  if (clickable.getAttribute('aria-selected') === 'true') return false;
+  clickable.click();
+  return true;
+}
+
+function depth(el: Element): number {
+  let level = 0;
+  let node: Element | null = el;
+  while (node?.parentElement) {
+    level += 1;
+    node = node.parentElement;
+  }
+  return level;
 }
 
 /**
@@ -46,23 +144,51 @@ export async function openTranscriptPanel(
   options: { waitMs?: number; timeoutMs?: number } = {},
 ): Promise<Element | null> {
   const { waitMs = 3000, timeoutMs = 8000 } = options;
+  triggerInfo = '开始打开面板…';
 
+  // 只有「已经有片段」的面板才算真的开着；空壳（只有标题）必须重新点开
   let panel = pickPanel(doc);
-  if (panel) {
+  if (panel && countSegments(panel) > 0) {
+    triggerInfo = '已有面板（含片段），未点击';
     await waitForSegments(panel, waitMs);
     return panel;
   }
 
+  triggerInfo = '面板存在但为空壳';
   const trigger = findTrigger(doc);
-  if (trigger) {
+  if (!trigger) {
+    // 简介折叠时按钮不可见：展开一次再找
+    if (await expandDescription(doc)) {
+      triggerInfo = '展开简介后';
+      const retry = findTrigger(doc);
+      if (retry) {
+        triggerInfo = `点击触发器: ${retry.textContent?.trim().slice(0, 30) ?? ''}`;
+        retry.click();
+        await sleep(400);
+      } else {
+        triggerInfo = `展开简介后仍未找到触发器；可点项: ${describeTriggers(doc)}`;
+      }
+    } else {
+      triggerInfo = `未找到 Show transcript 触发器；可点项: ${describeTriggers(doc)}`;
+    }
+  } else {
+    triggerInfo = `点击触发器: ${trigger.textContent?.trim().slice(0, 30) ?? ''}`;
     trigger.click();
     await sleep(400);
   }
 
   const deadline = Date.now() + timeoutMs;
+  let tabClicked = false;
   while (Date.now() < deadline) {
     panel = pickPanel(doc);
-    if (panel && scorePanel(panel) > 0) return panel;
+    if (panel) {
+      if (scorePanel(panel) > 0) return panel;
+      if (!tabClicked && clickTranscriptTab(panel)) {
+        tabClicked = true;
+        await sleep(300);
+        continue;
+      }
+    }
     await sleep(150);
   }
   return panel ?? null;

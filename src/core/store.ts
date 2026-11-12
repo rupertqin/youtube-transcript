@@ -55,5 +55,6 @@ export function emptyPanelState(videoId = ''): PanelState {
     activeIndex: -1,
     updatedAt: 0,
     progress: null,
+    diagnostic: null,
   };
 }

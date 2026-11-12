@@ -3,6 +3,7 @@ import { findActiveIndex } from '../core/lines';
 import { log } from '../core/log';
 import { createStore, emptyPanelState, type Store } from '../core/store';
 import type { ErrorCode, HarvestResult, PanelState } from '../core/types';
+import { getLegacyDiagnostic } from '../core/dom/legacy';
 import { readVideoId } from '../core/harvest/player';
 
 /** 每一层兜底对应的用户可读提示（面板加载态里显示）。 */
@@ -65,6 +66,7 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
       error: null,
       activeIndex: -1,
       progress: null,
+      diagnostic: null,
       updatedAt: Date.now(),
     });
 
@@ -149,6 +151,14 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
         lines: [],
         source: null,
         progress: null,
+        // 诊断文本首行印版本号：复制文本发出来就能立刻确认跑的是哪一版
+        diagnostic:
+          [
+            `脚本版本: v${typeof __YTT_VERSION__ === 'string' ? __YTT_VERSION__ : 'dev'}`,
+            getLegacyDiagnostic(),
+          ]
+            .filter((line) => line.length > 0)
+            .join('\n') || null,
         updatedAt: Date.now(),
       });
       log({ code, source: 'host', detail: String((error as Error).message) });

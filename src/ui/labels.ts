@@ -21,8 +21,8 @@ export const ERROR_COPY: Record<ErrorCode, { title: string; hint: string }> = {
     hint: '这是服务端签名策略导致的。重试会走被动拦截层，通常能拿到播放器自己的请求结果。',
   },
   SELECTOR_MISS: {
-    title: '页面结构已变化',
-    hint: 'YouTube 改了 DOM。选择器可以在设置里远程覆盖，或等插件更新。',
+    title: '没能从原生面板读到字幕行',
+    hint: '原版 Copy Transcript 按钮已能识别 2026 面板并直接复制；新版会自动切到 Transcript 标签并等字幕渲染。若仍失败，点「复制页面结构」把真实 DOM 发给我，就能一次定位。',
   },
   RATE_LIMITED: {
     title: '请求过于频繁',
@@ -38,7 +38,7 @@ export const ERROR_COPY: Record<ErrorCode, { title: string; hint: string }> = {
   },
   UNKNOWN: {
     title: '没抓到字幕',
-    hint: '点重试会重新跑完整兜底链（播放器 → InnerTube → 拦截 → DOM）。',
+    hint: '点重试会重新跑完整兜底链（DOM → 拦截 → 播放器/InnerTube）。',
   },
 };
 

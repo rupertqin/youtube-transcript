@@ -21,7 +21,12 @@
         panels: [
             'ytd-transcript-search-panel-renderer',
             'ytd-engagement-panel-section-list-renderer[target-id="engagement-panel-transcript"]',
-            '[role="dialog"] ytd-transcript-segment-list-renderer'
+            '[role="dialog"] ytd-transcript-segment-list-renderer',
+            // ---- 2026 兼容：只加选择器，原三条一条不动 ----
+            // 字幕面板改名 PAmodern_transcript_view；当前展开的那块 target-id 甚至是空的。
+            'ytd-engagement-panel-section-list-renderer[target-id*="transcript"]',
+            'ytd-engagement-panel-section-list-renderer[visibility*="EXPANDED"]',
+            'yt-engagement-panel-section-list-view-model'
         ].join(','),
         list: 'ytd-transcript-segment-list-renderer',
         segOld: 'ytd-transcript-segment-renderer, .ytd-transcript-segment-renderer',
@@ -34,6 +39,42 @@
     const normalize = (s) => (s || '').replace(/\s+/g, ' ').trim();
     const DEBUG = true;
     const log = (...a) => { if (DEBUG) console.debug('[copy-transcript]', ...a); };
+
+    /* ------------------------------------------------------------------ *
+     * 2026 兼容（新增内部辅助，不导出）：面板里已经没有
+     * ytd-transcript-segment-* 标签，字幕行只能从 innerText 按时间码切出来 ——
+     * 这正是原版 extractFallback() 一直在做的事，缺的只是「被喂对面板」。
+     *
+     * 这里数「连续递增、相邻间隔 <= 45s」的行数：字幕相邻只隔几秒，
+     * 章节时间点（28:14 -> 33:04 -> 34:23）隔几分钟，自然连不成段。
+     * 因此既不会把停在 Chapters 的面板当成字幕面板，也不会把章节复制成字幕。
+     * ------------------------------------------------------------------ */
+    function timecodeToMs(time) {
+        const bits = time.split(':').map(Number);
+        if (bits.some((n) => !Number.isFinite(n))) return -1;
+        return bits.length === 3
+            ? (bits[0] * 3600 + bits[1] * 60 + bits[2]) * 1000
+            : (bits[0] * 60 + bits[1]) * 1000;
+    }
+
+    function subtitleRows(root) {
+        const raw = normalizeLines(root.innerText || '');
+        if (!raw) return 0;
+        const parts = raw.split(/\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*/);
+        let best = 0;
+        let run = 0;
+        let lastMs = -1;
+        for (let i = 1; i < parts.length; i += 2) {
+            const time = parts[i];
+            const text = normalize(parts[i + 1]);
+            const ms = time ? timecodeToMs(time) : -1;
+            if (!time || !text || ms < 0) { run = 0; lastMs = -1; continue; }
+            run = (run > 0 && ms > lastMs && ms - lastMs <= 45000) ? run + 1 : 1;
+            lastMs = ms;
+            if (run > best) best = run;
+        }
+        return best;
+    }
 
     function waitForElement(selector, timeout = 10000) {
         return new Promise((resolve, reject) => {
@@ -66,8 +107,10 @@
      * 面板唯一化选择
      * ------------------------------------------------------------------ */
     function countSegments(root) {
-        if (!root.querySelector(SEL.list) && !root.querySelector(SEL.segOld)) return -1;
-        return root.querySelectorAll(SEL.segOld + ',' + SEL.segNew).length;
+        const legacy = root.querySelectorAll(SEL.segOld + ',' + SEL.segNew).length;
+        if (legacy > 0 || root.querySelector(SEL.list)) return legacy;
+        // 2026 兼容：没有旧片段标签时，改用 innerText 能切出的字幕行数评分
+        return subtitleRows(root);
     }
 
     function pickPanel() {
@@ -75,15 +118,37 @@
         const visible = all.filter(isVisible);
         const pool = visible.length ? visible : all;
         if (!pool.length) return null;
-        // 多个候选面板时取片段最多的那个（真正的主面板）
-        pool.sort((a, b) => countSegments(b) - countSegments(a));
-        return pool[0];
+
+        // 2026 兼容：#panels 里同时挂着十几块面板，只有一块是 EXPANDED。
+        // 只认「至少能切出 3 行连续字幕」的面板，避免把停在 Chapters 的面板
+        // 当成字幕面板 —— 否则早退分支会跳过 Show transcript 点击，字幕反而不渲染。
+        // 旧版页面只要有片段标签就照旧认，不受行数阈值影响。
+        const scored = pool
+            .map((el) => {
+                const rows = countSegments(el);
+                const visibility = el.getAttribute('visibility') || '';
+                return {
+                    el,
+                    rows,
+                    ready: rows >= 3 ||
+                        Boolean(el.querySelector(SEL.list) || el.querySelector(SEL.segOld)),
+                    score: rows +
+                        (visibility.includes('EXPANDED') ? 25 : 0) -
+                        (visibility.includes('HIDDEN') ? 25 : 0)
+                };
+            })
+            .filter((item) => item.ready)
+            .sort((a, b) => b.score - a.score);
+        return scored.length ? scored[0].el : null;
     }
 
     async function waitForSegments(panel, timeout = 8000) {
         const deadline = Date.now() + timeout;
         while (Date.now() < deadline) {
             if (panel.querySelector(SEL.list) || panel.querySelector(SEL.segOld)) return true;
+            // 2026 兼容：字幕行没有专用标签，innerText 能切出连续行就算就绪，
+            // 不再因为找不到旧标签而白等 6s / 8s。
+            if (subtitleRows(panel) >= 3) return true;
             await sleep(150);
         }
         return false;
@@ -110,7 +175,13 @@
         const deadline = Date.now() + 8000;
         while (Date.now() < deadline) {
             panel = pickPanel();
-            if (panel && (panel.querySelector(SEL.list) || panel.querySelector(SEL.segOld))) return panel;
+            // 2026 兼容：字幕框打开后行是纯文本，没有旧片段标签；
+            // 只要能切出连续字幕行就立刻返回，不用空等满 8s 再弹 alert。
+            if (panel && (
+                panel.querySelector(SEL.list) ||
+                panel.querySelector(SEL.segOld) ||
+                subtitleRows(panel) >= 3
+            )) return panel;
             await sleep(150);
         }
         return panel || null;

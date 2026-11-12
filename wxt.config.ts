@@ -1,5 +1,10 @@
 import { defineConfig } from 'wxt';
 import tailwindcss from '@tailwindcss/vite';
+import { readFileSync } from 'node:fs';
+
+const pkg = JSON.parse(
+  readFileSync(new URL('./package.json', import.meta.url), 'utf8'),
+) as { version: string };
 
 export default defineConfig({
   outDir: 'dist',
@@ -27,6 +32,7 @@ export default defineConfig({
     },
   },
   vite: () => ({
+    define: { __YTT_VERSION__: JSON.stringify(pkg.version) },
     plugins: [tailwindcss()],
     build: {
       target: 'chrome111',

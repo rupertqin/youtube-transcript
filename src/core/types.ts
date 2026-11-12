@@ -84,6 +84,8 @@ export interface PanelState {
   updatedAt: number;
   /** 抓取阶段的临时提示（如「正在打开原生面板」），就绪后清空 */
   progress?: string | null;
+  /** DOM 抓取失败时的面板结构快照，直接显示在错误卡片里 */
+  diagnostic?: string | null;
 }
 
 export type ExportFormat = 'txt' | 'md' | 'srt' | 'json';

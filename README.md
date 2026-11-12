@@ -10,6 +10,130 @@
 - 复制全文，或导出 `txt` / `md` / `srt` / `json`
 - 四层抓取兜底链 + 失败分类，抓一次缓存 7 天
 
+## 一个产物，两个入口
+
+同一份脚本在顶栏注入两个按钮，便于直接对比：
+
+| 按钮 | 行为 |
+| --- | --- |
+| `Copy Transcript`（`1.x` 徽标，中性色） | **1.x 原版流程**：打开 YouTube 原生面板 → 逐行读 DOM → 拼纯文本 → 写剪贴板，**不关闭面板**，按钮回显 `Copied N 行` / `Failed` |
+| `Transcript`（版本徽标，红色） | 新版：跑完整兜底链（DOM → 拦截 → 远程），结果显示在自己的面板里，可搜索/跟随播放/导出 |
+
+两者按钮 id 分别是 `copy-transcript-btn` 与 `ytt-entry-btn`，互不干扰；`Copy Transcript` 只走原生 DOM，不碰缓存也不走接口，所以它的结果就是「YouTube 面板里到底有什么」的基准。
+
+## 原版代码是怎么进来的（往多了抄 → 再慢慢减）
+
+**先整份搬进来保证能跑，再逐块减**；不先做「精简移植」。
+
+| 步骤 | 文件 | 内容 |
+| --- | --- | --- |
+| 1 | `scripts/sync-legacy.mjs` | 构建前自动同步，产出两份：`verbatim.js`（逐字节副本，仅用于核对）和 `verbatim-runtime.js`（**整份原版 + 唯一一行导出**） |
+| 2 | `src/legacy/verbatim-runtime.js` | 原版 IIFE 完整运行：按钮注入 `addCopyButton`、onclick 全流程、剪贴板 `copyToClipboard`、SPA `setInterval`、失败 `alert`，全部照跑。多出的那一行只把 18 个内部函数挂到 `globalThis.__yttLegacyV19` |
+| 3 | `src/core/dom/legacy.ts` | 新版 `dom` 层**直接调用原版自己的 `openTranscriptPanel()` / `extractTranscript()` / `extractFallback()`**，只做「纯文本 → 结构化行」的转换 |
+| 4 | `src/core/dom/legacy-copy.ts` | 同样只调 `__yttLegacyV19`，产物里不再有第二套「移植版」逻辑 |
+
+### 之前哪里没抄对
+
+对照 `user-script.js`（15 个函数）与曾经的 `src/core/dom/legacy-runtime.ts`：
+
+- **漏抄** `addCopyButton`、`buildButton`、`copyToClipboard`
+- **漏抄** 按钮注入 `setTimeout(addCopyButton, 2000)`、SPA 导航 `setInterval`、`navigator.clipboard`、按钮 `disabled` 状态机
+- 反而多出 `createLegacyRuntime` / `run` 两个自造包装
+
+漏掉的正是「让代码真正跑起来的入口层」：没有按钮注入，提取逻辑永远不会被调用。
+`legacy-runtime.ts` 现在只保留作对照，主路径不再引用它。
+
+### 原版「报 Could not find the transcript panel 却仍有字幕」的真相
+
+`user-script.js` 里真正把字幕切出来的，是 `extractFallback()`（把 `innerText` 按时间码切分）。
+但它**只在 `extractTranscript(panel)` 内部被调用**（第 205 行），而 `panel` 为 null 时
+onclick 第 297–299 行直接 `alert(...); return;` —— 这条路径永远走不到。
+
+2026 版把字幕面板的 `target-id` 改成了 `EAmodern_transcript_view`，
+`SEL.panels` 匹配不到它，于是原版弹窗退出；**可字幕文本其实就在页面上**
+（In this video 框里）。所以不是「有两套代码」，而是「能读字幕的那套被 if 挡住了」。
+
+`legacy.ts` 现在补上这一环：把整页可见文本（`body.innerText`，原版注释明确用它排除隐藏节点）
+喂给**同一个原版 `extractFallback()`**（构造一个 `querySelector` 恒为 null 的伪 panel，
+让原版 `scope = panel`）。切分逻辑一字不改；再用「时间戳最长递增段」挡掉推荐列表里
+乱序的视频时长。这条路径 0ms 命中，不必再等 `openTranscriptPanel()` 的 8 秒。
+
+### 按钮的职责是复制已有文字，不是去开面板
+
+`复制页面结构` 的真实 DOM 给出答案：当前展开的是一块
+`visibility="ENGAGEMENT_PANEL_VISIBILITY_EXPANDED"` 但 **`target-id=""`** 的
+`ytd-engagement-panel-section-list-renderer`，内容是
+`In this video ChaptersTranscript … Chapter 1: … 3:32` —— 面板开着，但**停在
+Chapters 标签页**，字幕行根本没渲染。原版 `SEL.panels` 要求
+`target-id="engagement-panel-transcript"`，认不出这块空 target-id 的面板，
+于是去点 `Show transcript`（把已展开的面板关掉），最后弹
+`Could not find the transcript panel`。
+
+现在（`src/core/dom/legacy.ts`，逐字节的 `verbatim-runtime.js` 一字未改）：
+
+- ⓪ `snapshotTranscriptText(doc)` **同步**读当前可见文本，逐源交给原版
+  `extractFallback()`，取时间戳最长递增段；命中即返回，不点任何按钮
+- ① 快照为空时 `switchToTranscriptTab()` **精确点击文案恰好是 `Transcript` 的标签**，
+  让 YouTube 自己渲染字幕行。不会误点 `Show transcript` / `Copy Transcript` /
+  `Transcript v2.x`（我们自己的按钮）
+- ② 每 250ms 轮询快照，最多 12 次，等虚拟列表把行渲染出来
+- ③ 仍读不到、且面板**未**展开时才走原版 `openTranscriptPanel()` 兜底；
+  面板已 `EXPANDED` 时跳过它，避免再次点 `Show transcript` 把面板关掉
+- **不接管、不拦截、不改写** 1.x 的 `Copy Transcript` 按钮：它由逐字节的
+  `verbatim-runtime.js` 自己注入、自己处理 onclick，行为完全保持原版
+- 快照只取**可见文本**（`body.innerText` + 穿透 shadow 的候选元素），
+  **不再用 `body.textContent`** —— 后者会把 ytInitialData 里的章节 JSON 带进来，
+  切出 `28:14 ] — Rethinking…\n[` 这种「章节时间点冒充字幕」的假数据
+- 时间戳最长递增段要求相邻间隔 ≤ 45 秒、至少 3 行、行内无 JSON 残留；
+  章节列表（隔几分钟）会被切开并挡掉。缓存写入用同一判据，
+  `CACHE_SCHEMA` 升到 4 让已经存进去的章节假数据失效
+
+### 2026 面板识别：为什么 Copy Transcript 一直弹「找不到面板」
+
+用户确认的现象：**点 `Copy Transcript` 后，视频下方字幕框先打开、里面全是字幕行，
+隔几秒才弹 `Could not find the transcript panel`** —— 字幕其实已经渲染，只是没被读走。
+
+根因在 `user-script.js` 的 `pickPanel()`：原 `SEL.panels` 只认
+`engagement-panel-transcript`，而 2026 版展开面板 `target-id=""`、
+字幕面板叫 `PAmodern_transcript_view`。`pickPanel()` 恒为 null →
+`openTranscriptPanel()` 空等 8 秒 → onclick 弹 alert 并 `return reset()`，
+`copyToClipboard()` 从未调用。
+
+修复只落在 `user-script.js` 的识别层（构建时逐字节同步到两端产物）：
+
+- `SEL.panels` 保留原三条，新增 `[target-id*="transcript"]`、
+  `[visibility*="EXPANDED"]`、`yt-engagement-panel-section-list-view-model`
+- 新增内部辅助 `timecodeToMs()` / `subtitleRows()`（**不导出**），
+  统计 `innerText` 里连续递增、相邻间隔 ≤ 45s 的字幕行数；
+  章节时间点隔几分钟连不成段，因此不会把 Chapters 面板误当字幕面板
+- `countSegments()` / `pickPanel()` / `waitForSegments()` /
+  `openTranscriptPanel()` 改用这个行数做评分与就绪判定：
+  字幕行一出现就立刻返回，不再白等 8s / 6s；面板停在 Chapters 时仍返回 null，
+  让原版照旧点 `Show transcript` 把字幕框打开
+- `extractFallback()`（按时间码切 `innerText`）、`collectFromList()`、
+  `copyToClipboard()`、`buildButton()`、onclick 状态机、三处 alert、
+  `Copied!` 文案、按钮样式、SPA `setInterval` **一行未改**
+
+### 保证能运行的验收
+
+`tests/verbatim-runtime.test.ts` 用 `node:vm` **真实执行整份 `verbatim-runtime.js`**，断言
+18 个内部函数全部挂载、且原版 `extractFallback` 能把带时间码的面板文本切出字幕行。
+`tests/legacy.test.ts` 另有「逐字节一致」与「导出名单每个名字都在原版里声明过」两条静态校验，
+防止同步漂移或 IIFE 抛 `ReferenceError`。
+
+按钮由原版脚本自己注入（`copy-transcript-btn`），新版按钮 id 是 `ytt-entry-btn`，互不干扰；
+`removeEntryButton()` 只删新版自己的按钮。
+
+> 新版 `dom` 层（`legacy.ts`）还做两处适配，但不改原版提取逻辑：面板若在 shadow root 里，
+> 用 `deepQueryAll` 重新发现面板后**仍交给原版的 `extractFallback()`** 切时间码；
+> 失败时把 `dumpStructureSummary()`（面板候选、44 个按钮的 text/aria-label/title、时间码行）
+> 自动写进诊断文本，不需要用户额外点「复制页面结构」。
+>
+> 原版能读到 2026 版 "In this video" 框里的字幕，靠的是 `extractFallback`：
+> 片段标签一个都匹配不到时，它直接把 `panel.innerText` 按时间码切分。
+> 它**不要求面板里已经有片段元素**。之前的新版实现加了「面板必须有片段」这个条件，
+> 把那个能产出文本的面板丢掉了 —— 这是「原版能行、新版不行」的分歧点。
+
 ## 安装
 
 ### Chrome 扩展
@@ -79,12 +203,17 @@ src/ui/                      面板组件（双端同一份，原生 DOM）
 
 按可靠度串联，任一层拿到非空行即短路返回：
 
+顺序就是 1.x 的顺序：**先走经过验证的那条路，失败才去试旁路**。
+
 | 顺序 | 层 | 说明 |
 | --- | --- | --- |
-| 1 | `player` | 读 `playerResponse.captionTracks` 的 `baseUrl`，用页面 cookie 再请求 `json3 → srv1` |
-| 2 | `innertube` | `/youtubei/v1/player` 逐级降级 `ANDROID → TVHTML5_EMBED`（签名 caption URL 不强制 POT） |
-| 3 | `intercept` | document_start 装 `fetch` / `XHR` hook，白嫖播放器自己发起的字幕响应。**同时覆盖两种接口**：`/api/timedtext`（播放器，带 POT）和 `/youtubei/v1/get_transcript`（原生面板，结构化 JSON、不吃 POT） |
-| 4 | `dom` | 打开原生 Show transcript 面板抓 DOM（1.x 的老路径，永远的最后一道） |
+| 1 | `dom` | 打开原生 Show transcript 面板，按 `ytd-transcript-segment-renderer` / `yt-transcript-segment-renderer` 逐行读（**1.x 原版算法，选择器表与判定逻辑逐条对齐**） |
+| 2 | `get_transcript` | **不再依赖面板打开**：直接构造 InnerTube `get_transcript` 请求（原生面板的数据源），params 按 protobuf 编码生成 |
+| 3 | `intercept` | 面板打开时播放器/面板自己会发请求，hook 顺手截一份。覆盖 `/api/timedtext` 与 `/youtubei/v1/get_transcript` |
+| 4 | `player` | 读 `playerResponse.captionTracks` 的 `baseUrl`，用页面 cookie 再请求 `json3 → srv1` |
+| 5 | `innertube` | `/youtubei/v1/player` 逐级降级 `ANDROID → TVHTML5_EMBED` |
+
+> 2–4 只在 1 拿不到任何行时才执行，不会改写 1 的结果。POT 生效的视频里 2–4 基本都会失败，真正救场的是第 1 层。
 
 第 3、4 层共用同一次「打开原生面板」动作：面板一开，播放器就会发起 timedtext 请求，hook 与 DOM 抓取同时具备条件。
 
