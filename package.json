@@ -1,0 +1,28 @@
+{
+  "name": "youtube-transcript",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "description": "YouTube transcript workbench for Chrome (MV3) and Tampermonkey, sharing one core.",
+  "scripts": {
+    "postinstall": "wxt prepare",
+    "icons": "node scripts/gen-icons.mjs",
+    "dev": "wxt",
+    "dev:userscript": "vite build --config vite.userscript.config.ts --watch",
+    "build:ext": "wxt build",
+    "build:userscript": "vite build --config vite.userscript.config.ts",
+    "build": "npm run icons && npm run build:ext && npm run build:userscript",
+    "zip": "wxt zip",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.5",
+    "@types/chrome": "^0.3.7",
+    "@types/node": "^26.6.6",
+    "tailwindcss": "^4.3.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0",
+    "wxt": "^0.21.5"
+  }
+}

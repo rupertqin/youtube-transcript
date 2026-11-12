@@ -1,0 +1,24 @@
+{
+  "extends": "./.wxt/tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "verbatimModuleSyntax": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noUncheckedIndexedAccess": false,
+    "skipLibCheck": true,
+    "types": ["chrome", "node"]
+  },
+  "include": [
+    "entrypoints",
+    "src",
+    "userscript",
+    "tests",
+    "scripts",
+    "types",
+    "wxt.config.ts",
+    "vite.userscript.config.ts",
+    "vitest.config.ts",
+    ".wxt/wxt.d.ts"
+  ]
+}

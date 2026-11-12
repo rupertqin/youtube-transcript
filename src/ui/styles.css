@@ -1,0 +1,166 @@
+@import "tailwindcss";
+
+/* 显式声明扫描范围：两端的构建根目录不同（WXT 用项目根、油猴 build 也是项目根，
+   但预览/独立构建可能换 root），不写死会漏生成工具类。 */
+@source "../../src";
+@source "../../entrypoints";
+@source "../../userscript";
+
+/* ------------------------------------------------------------------ *
+ * 设计令牌：面板自带一套语义变量，靠 .ytt-light 覆盖成浅色。
+ * 刻意不用 `dark:` 变体 —— 两个挂载点（Side Panel 文档 / Shadow DOM 浮层）
+ * 的主题载体不同，用变量 + 根节点 class 最稳。
+ * ------------------------------------------------------------------ */
+.ytt-root {
+  --ytt-bg: #0f0f10;
+  --ytt-bg-elev: #17181a;
+  --ytt-surface: #1f2023;
+  --ytt-surface-2: #26282c;
+  --ytt-border: rgba(255, 255, 255, 0.08);
+  --ytt-border-strong: rgba(255, 255, 255, 0.16);
+  --ytt-text: #f2f3f5;
+  --ytt-text-dim: #a8adb6;
+  --ytt-text-mute: #6b7280;
+  --ytt-hover: rgba(255, 255, 255, 0.06);
+  --ytt-accent: #ff4e45;
+  --ytt-accent-2: #ff7a45;
+  --ytt-accent-soft: rgba(255, 78, 69, 0.14);
+  --ytt-highlight: rgba(255, 122, 69, 0.26);
+  --ytt-shadow: 0 18px 50px -12px rgba(0, 0, 0, 0.7);
+  --ytt-ok: #22c55e;
+  --ytt-warn: #f59e0b;
+  --ytt-err: #ef4444;
+
+  font-family: Inter, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ytt-text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.ytt-root.ytt-light {
+  --ytt-bg: #ffffff;
+  --ytt-bg-elev: #f6f7f9;
+  --ytt-surface: #ffffff;
+  --ytt-surface-2: #f1f2f4;
+  --ytt-border: rgba(15, 15, 16, 0.1);
+  --ytt-border-strong: rgba(15, 15, 16, 0.2);
+  --ytt-text: #111214;
+  --ytt-text-dim: #4b5563;
+  --ytt-text-mute: #6b7280;
+  --ytt-hover: rgba(15, 15, 16, 0.05);
+  --ytt-accent-soft: rgba(255, 78, 69, 0.1);
+  --ytt-highlight: rgba(255, 122, 69, 0.22);
+  --ytt-shadow: 0 18px 50px -18px rgba(15, 15, 16, 0.3);
+}
+
+/* 必须落在 @layer base 里：未分层的规则会盖掉 @layer utilities 的 padding/border/背景 */
+@layer base {
+  .ytt-root *,
+  .ytt-root *::before,
+  .ytt-root *::after {
+    box-sizing: border-box;
+  }
+
+  .ytt-root button {
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+  }
+
+  .ytt-root input {
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    outline: none;
+  }
+
+  .ytt-root ::selection {
+    background: var(--ytt-accent-soft);
+  }
+}
+
+/* 细滚动条：浮层和侧栏都窄，默认滚动条太抢 */
+.ytt-root .ytt-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ytt-border-strong) transparent;
+}
+.ytt-root .ytt-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.ytt-root .ytt-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.ytt-root .ytt-scroll::-webkit-scrollbar-thumb {
+  background: var(--ytt-border-strong);
+  border-radius: 999px;
+}
+.ytt-root .ytt-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--ytt-text-mute);
+}
+
+@keyframes ytt-shimmer {
+  0% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.75;
+  }
+  100% {
+    opacity: 0.35;
+  }
+}
+
+@keyframes ytt-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes ytt-pulse {
+  0% {
+    background-color: var(--ytt-accent-soft);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.ytt-shimmer {
+  animation: ytt-shimmer 1.6s ease-in-out infinite;
+}
+
+.ytt-enter {
+  animation: ytt-slide-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.ytt-pulse {
+  animation: ytt-pulse 320ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ytt-root .ytt-shimmer,
+  .ytt-root .ytt-enter,
+  .ytt-root .ytt-pulse {
+    animation: none;
+  }
+}
+
+/* 高对比度：边界与正文对比度提升 */
+@media (prefers-contrast: more) {
+  .ytt-root {
+    --ytt-border: var(--ytt-border-strong);
+    --ytt-text-dim: var(--ytt-text);
+  }
+}
