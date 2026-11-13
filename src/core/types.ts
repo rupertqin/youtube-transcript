@@ -21,6 +21,12 @@ export interface TranscriptLine {
   text: string;
 }
 
+/** 章节与字幕行同构（起点 + 标题），但独立存放，绝不混进 lines。 */
+export type Chapter = TranscriptLine;
+
+/** 面板当前展示/复制的内容视图，两个入口共用。 */
+export type ContentView = 'lines' | 'chapters';
+
 export interface CaptionTrack {
   baseUrl: string;
   languageCode: string;
@@ -74,13 +80,24 @@ export interface PanelState {
   title: string;
   status: 'idle' | 'loading' | 'ready' | 'error';
   lines: TranscriptLine[];
+  /** storyboard 规格串：章节行据此裁出该时间点的画面 */
+  storyboard: string | null;
+  /** 章节独立存放：不能被 looksLikeTranscript 判成字幕，也不混进 lines */
+  chapters: Chapter[];
   showTimestamps: boolean;
   source: SourceName | null;
   lang: string | null;
   cached: boolean;
   failures: FailureRecord[];
   error: { code: ErrorCode; detail?: string } | null;
+  /** 当前高亮行（字幕视图用），-1 表示无 */
   activeIndex: number;
+  /**
+   * 真实播放位置（毫秒），-1 表示未知。
+   * 章节高亮必须用它 —— activeIndex 指向的是「字幕行的 start」，
+   * 那个时间点必然早于章节起点，拿它算章节会永远高亮上一章。
+   */
+  positionMs: number;
   updatedAt: number;
   /** 抓取阶段的临时提示（如「正在打开原生面板」），就绪后清空 */
   progress?: string | null;

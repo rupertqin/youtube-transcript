@@ -7,7 +7,9 @@ export type BridgeRequest =
   | { type: 'PING' }
   | { type: 'HARVEST_REMOTE'; videoId: string; langs: string[] }
   | { type: 'WAIT_TIMEDTEXT'; videoId: string; timeoutMs: number }
-  | { type: 'GET_TRANSCRIPT'; videoId: string; langs: string[] };
+  | { type: 'GET_TRANSCRIPT'; videoId: string; langs: string[] }
+  /** storyboard 规格只在 MAIN world 读得到（playerResponse 在页面上下文） */
+  | { type: 'STORYBOARD' };
 
 export interface BridgeRemotePayload {
   lines: { start: number; dur: number; text: string }[];

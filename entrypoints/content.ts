@@ -61,6 +61,15 @@ export default defineContentScript({
       win: window,
       hooks: {
         title: () => readTitle(window),
+        // playerResponse 只在 MAIN world，章节截图规格必须过桥
+        storyboard: async () => {
+          if (!(await ensureBridge())) return null;
+          try {
+            return await bridge.request<string | null>('STORYBOARD', null, 2500);
+          } catch {
+            return null;
+          }
+        },
         harvest: async (videoId, signal, onStage) => {
           // bridge 没起来（旧标签页、注入失败）时直接退化到 DOM 抓取，别白等超时
           const bridgeUp = await ensureBridge();

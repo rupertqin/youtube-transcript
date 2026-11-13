@@ -1,4 +1,5 @@
 import { formatTimestamp } from '../core/format/export';
+import type { StoryboardFrame } from '../core/storyboard';
 import type { TranscriptLine } from '../core/types';
 import { h } from './dom';
 import { renderHighlighted } from './search';
@@ -23,6 +24,9 @@ export interface RowOptions {
   active: boolean;
   showTimestamps: boolean;
   needle: string;
+  /** 章节视图下该时间点的截图；取不到就不传，行布局保持不变 */
+  thumb?: StoryboardFrame | null;
+  /** 单位：秒。TranscriptLine.start 是毫秒，转换在调用点完成。 */
   onSeek: (seconds: number) => void;
 }
 
@@ -37,37 +41,66 @@ export function createRow(options: RowOptions): HTMLElement {
   row.dataset.original = String(original);
   row.dataset.hasTime = showTimestamps ? '1' : '0';
 
-  row.appendChild(h('span', { class: `${BAR_BASE} ${active ? BAR_ON : BAR_OFF}` }));
+  const bar = h('span', { class: `${BAR_BASE} ${active ? BAR_ON : BAR_OFF}` });
+  bar.dataset.role = 'bar';
+  row.appendChild(bar);
 
-  if (showTimestamps) {
+  const thumb = options.thumb;
+  if (thumb) {
+    // 雪碧图裁切：整张图集按显示宽度缩放，再平移把目标帧露出来
     row.appendChild(
-      h('span', { class: `${TIME_BASE} ${active ? TIME_ON : TIME_OFF}`, text: formatTimestamp(line.start) }),
+      h('span', {
+        class: 'mt-[1px] shrink-0 overflow-hidden rounded-[3px] bg-[var(--ytt-hover)]',
+        style: {
+          width: `${thumb.width}px`,
+          height: `${thumb.height}px`,
+          'background-image': `url("${thumb.url}")`,
+          'background-size': `${thumb.sheetWidth}px ${thumb.sheetHeight}px`,
+          'background-position': `${thumb.offsetX}px ${thumb.offsetY}px`,
+          'background-repeat': 'no-repeat',
+        },
+        attrs: { 'aria-hidden': 'true' },
+      }),
     );
   }
 
+  if (showTimestamps) {
+    const time = h('span', {
+      class: `${TIME_BASE} ${active ? TIME_ON : TIME_OFF}`,
+      text: formatTimestamp(line.start),
+    });
+    time.dataset.role = 'time';
+    row.appendChild(time);
+  }
+
   const text = h('span', { class: `${TEXT_BASE} ${active ? TEXT_ON : TEXT_OFF}` });
+  text.dataset.role = 'text';
   text.append(renderHighlighted(line.text, needle));
   row.appendChild(text);
 
   row.addEventListener('click', () => {
-    if (line.start >= 0) options.onSeek(line.start);
+    // line.start 是毫秒；session.seek() 直接写 video.currentTime，单位是秒。
+    // 之前传毫秒会让 1:05 跳到 65000 秒，且高亮行全错。
+    if (line.start >= 0) options.onSeek(line.start / 1000);
   });
 
   return row;
 }
 
-/** 播放位置变化时只改 class，不重建行。 */
-export function applyRowState(row: HTMLElement, active: boolean, showTimestamps: boolean): void {
+/**
+ * 播放位置变化时只改 class，不重建行。
+ * 用 data-role 定位子元素 —— 章节行多一个缩略图，靠 children 下标会错位。
+ */
+export function applyRowState(row: HTMLElement, active: boolean, _showTimestamps: boolean): void {
   row.classList.toggle(ROW_ACTIVE, active);
   row.classList.toggle(ROW_IDLE, !active);
 
-  const [bar, second, third] = Array.from(row.children) as HTMLElement[];
+  const bar = row.querySelector<HTMLElement>('[data-role="bar"]');
   if (bar) bar.className = `${BAR_BASE} ${active ? BAR_ON : BAR_OFF}`;
 
-  if (showTimestamps) {
-    if (second) second.className = `${TIME_BASE} ${active ? TIME_ON : TIME_OFF}`;
-    if (third) third.className = `${TEXT_BASE} ${active ? TEXT_ON : TEXT_OFF}`;
-  } else if (second) {
-    second.className = `${TEXT_BASE} ${active ? TEXT_ON : TEXT_OFF}`;
-  }
+  const time = row.querySelector<HTMLElement>('[data-role="time"]');
+  if (time) time.className = `${TIME_BASE} ${active ? TIME_ON : TIME_OFF}`;
+
+  const text = row.querySelector<HTMLElement>('[data-role="text"]');
+  if (text) text.className = `${TEXT_BASE} ${active ? TEXT_ON : TEXT_OFF}`;
 }

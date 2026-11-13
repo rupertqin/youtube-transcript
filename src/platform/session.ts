@@ -4,7 +4,8 @@ import { log } from '../core/log';
 import { createStore, emptyPanelState, type Store } from '../core/store';
 import type { ErrorCode, HarvestResult, PanelState } from '../core/types';
 import { getLegacyDiagnostic } from '../core/dom/legacy';
-import { readVideoId } from '../core/harvest/player';
+import { cleanLines, readChapters } from '../core/format/copy';
+import { readStoryboardSpec, readVideoId } from '../core/harvest/player';
 
 /** 每一层兜底对应的用户可读提示（面板加载态里显示）。 */
 const STAGE_TEXT: Record<'player' | 'intercept' | 'dom' | 'panel', string> = {
@@ -31,6 +32,11 @@ export interface SessionHooks {
     onStage: (stage: string) => void,
   ) => Promise<HarvestResult>;
   title: () => string;
+  /**
+   * storyboard 规格。扩展的 content script 在 isolated world，读不到页面的
+   * playerResponse，必须由宿主通过 MAIN world bridge 取；不传则就地读。
+   */
+  storyboard?: (videoId: string) => Promise<string | null>;
 }
 
 export interface Session {
@@ -52,12 +58,33 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
   let controller: AbortController | null = null;
   let inflight = 0;
 
+  /**
+   * 宿主要是提供了 storyboard 钩子就走它（扩展需要穿到 MAIN world），
+   * 否则就地读 —— 油猴脚本本身就在页面上下文，直接就能拿到。
+   * 失败一律降级成 null：没有截图不影响章节本身。
+   */
+  const loadStoryboard = async (videoId: string): Promise<string | null> => {
+    try {
+      if (hooks.storyboard) return await hooks.storyboard(videoId);
+      return readStoryboardSpec(win);
+    } catch {
+      return null;
+    }
+  };
+
   const applyResult = async (videoId: string, result: HarvestResult): Promise<void> => {
+    // 无障碍时长短语（"33 minutes, 26 seconds"）在进 state 前统一洗掉，
+    // 显示、搜索、复制、导出都基于同一份干净文本
+    const lines = cleanLines(result.lines);
+    const chapters = readChapters(win.document);
+    const storyboard = await loadStoryboard(videoId);
     store.setState({
       videoId,
       title: hooks.title(),
       status: 'ready',
-      lines: result.lines,
+      lines,
+      chapters,
+      storyboard,
       showTimestamps: result.showTimestamps,
       source: result.source,
       lang: result.track?.languageCode ?? null,
@@ -78,7 +105,8 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
         kind: result.track?.kind ?? 'manual',
         title: store.getState().title,
         source: result.source,
-        lines: result.lines,
+        lines,
+        chapters,
         showTimestamps: result.showTimestamps,
         savedAt: Date.now(),
       });
@@ -97,11 +125,15 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
       const cached = await readCacheForVideo(videoId);
       if (run !== inflight) return;
       if (cached) {
+        const storyboard = await loadStoryboard(videoId);
         store.setState({
           videoId,
           title: cached.title || hooks.title(),
           status: 'ready',
-          lines: cached.lines,
+          lines: cleanLines(cached.lines),
+          chapters: cached.chapters ?? readChapters(win.document),
+          // storyboard 的签名会过期，不进缓存，每次从页面现读
+          storyboard,
           showTimestamps: cached.showTimestamps,
           source: cached.source as PanelState['source'],
           lang: cached.lang,
@@ -144,11 +176,15 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
       if (signal.aborted || run !== inflight) return;
       const code = (error as { code?: ErrorCode }).code ?? 'UNKNOWN';
       const failures = (error as { failures?: PanelState['failures'] }).failures ?? store.getState().failures;
+      const storyboard = await loadStoryboard(videoId);
       store.setState({
         status: 'error',
         error: { code, detail: (error as Error).message },
         failures,
         lines: [],
+        // 抓取失败时章节仍可用：它是页面上的独立数据，不依赖字幕请求
+        chapters: readChapters(win.document),
+        storyboard,
         source: null,
         progress: null,
         // 诊断文本首行印版本号：复制文本发出来就能立刻确认跑的是哪一版
@@ -180,7 +216,16 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
     if (videoId === current.videoId && current.status !== 'idle') return;
 
     controller?.abort();
-    store.setState({ ...emptyPanelState(videoId), status: 'loading', title: hooks.title() });
+    store.setState({
+      ...emptyPanelState(videoId),
+      chapters: readChapters(win.document),
+      status: 'loading',
+      title: hooks.title(),
+    });
+    // 截图规格可能要走异步桥，先渲染章节、稍后补图
+    void loadStoryboard(videoId).then((spec) => {
+      if (spec && store.getState().videoId === videoId) store.setState({ storyboard: spec });
+    });
     void load();
   };
 
@@ -188,9 +233,23 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
     const target = event.target as HTMLVideoElement | null;
     if (!target || target.tagName !== 'VIDEO') return;
     const state = store.getState();
-    if (state.lines.length === 0) return;
-    const index = findActiveIndex(state.lines, target.currentTime ?? 0);
-    if (index !== state.activeIndex) store.setState({ activeIndex: index });
+    const seconds = target.currentTime ?? 0;
+    const positionMs = Math.max(0, Math.round(seconds * 1000));
+
+    // 章节高亮只认真实播放位置；字幕高亮才用行索引。
+    // 两者都要，否则章节视图永远停在上一章（activeIndex 的 start 早于章节起点）。
+    // 没有章节时不记位置：positionMs 每次 timeupdate 都变，会白白多渲染几倍。
+    // 按秒取整：章节是分钟级粒度，秒级足够，也避免每次 timeupdate 都渲染。
+    const patch: Partial<PanelState> = {};
+    if (state.chapters.length > 0) {
+      const rounded = Math.floor(positionMs / 1000) * 1000;
+      if (rounded !== state.positionMs) patch.positionMs = rounded;
+    }
+    if (state.lines.length > 0) {
+      const index = findActiveIndex(state.lines, seconds);
+      if (index !== state.activeIndex) patch.activeIndex = index;
+    }
+    if (Object.keys(patch).length > 0) store.setState(patch);
   };
 
   const seek = (seconds: number): void => {
@@ -198,8 +257,13 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
     if (!video || !Number.isFinite(seconds) || seconds < 0) return;
     video.currentTime = seconds;
     const state = store.getState();
-    const index = findActiveIndex(state.lines, seconds);
-    if (index >= 0 && index !== state.activeIndex) store.setState({ activeIndex: index });
+    // 立即把位置写进状态：不等 timeupdate，点击的瞬间章节高亮就跳到目标
+    const patch: Partial<PanelState> = { positionMs: Math.round(seconds * 1000) };
+    if (state.lines.length > 0) {
+      const index = findActiveIndex(state.lines, seconds);
+      if (index >= 0) patch.activeIndex = index;
+    }
+    store.setState(patch);
   };
 
   win.document.addEventListener('timeupdate', onTimeUpdate, true);

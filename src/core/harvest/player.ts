@@ -16,6 +16,16 @@ interface RawPlayerResponse {
     playerCaptionsTracklistRenderer?: { captionTracks?: RawTrack[] };
   };
   playabilityStatus?: { status?: string; reason?: string };
+  /** 章节缩略图（雪碧图）的规格串，见 core/storyboard.ts */
+  storyboards?: {
+    playerStoryboardSpecRenderer?: { spec?: string };
+  };
+}
+
+/** 取 storyboard 规格；拿不到就不显示章节截图，不影响其他功能。 */
+export function readStoryboardSpec(win: Window): string | null {
+  const spec = readPlayerResponse(win)?.storyboards?.playerStoryboardSpecRenderer?.spec;
+  return typeof spec === 'string' && spec.includes('|') ? spec : null;
 }
 
 /** 播放器实例上取 playerResponse；某些环境取不到时回落到首屏注入的全局对象。 */

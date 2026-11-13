@@ -56,6 +56,7 @@ function panel(name: string, attrs: Record<string, string>, innerText: string): 
 
 interface Sandbox {
   __yttLegacyV19?: Record<string, unknown>;
+  __yttSharedPrefs?: { timestamps: boolean; view: string };
   alert: ReturnType<typeof vi.fn>;
   clipboardWrite: ReturnType<typeof vi.fn>;
   triggerClick?: ReturnType<typeof vi.fn>;
@@ -82,9 +83,10 @@ function load2026(options: {
     'target-id': 'engagement-panel-comments-section',
     visibility: 'ENGAGEMENT_PANEL_VISIBILITY_HIDDEN',
   }, 'Comments 1.8K Top Show featured comments Newest');
+  // 真实 dump 里章节面板是 HIDDEN + target-id="engagement-panel-macro-markers-description-chapters"
   const chapters = panel('chapters', {
-    'target-id': '',
-    visibility: 'ENGAGEMENT_PANEL_VISIBILITY_EXPANDED',
+    'target-id': 'engagement-panel-macro-markers-description-chapters',
+    visibility: 'ENGAGEMENT_PANEL_VISIBILITY_HIDDEN',
   }, CHAPTERS);
 
   const panels = [expanded, hidden, comments, chapters];
@@ -104,6 +106,11 @@ function load2026(options: {
     getElementById: () => null,
     querySelector: () => null,
     querySelectorAll: (selector: string) => {
+      // 章节选择器只应命中真正的章节面板，不能把字幕面板算进来
+      if (selector.includes('[target-id*="chapter"]') ||
+          selector.includes('[target-id*="macro-markers"]')) {
+        return [chapters];
+      }
       // SEL.panels 同时含 [visibility*="EXPANDED"] 与 [target-id*="transcript"]
       if (selector.includes('[visibility*="EXPANDED"]') ||
           selector.includes('[target-id*="transcript"]')) {
@@ -199,6 +206,33 @@ describe('2026 面板识别：Copy Transcript 不再空等后弹 alert', () => {
     expect(sandbox.clipboardWrite).toHaveBeenCalledTimes(1);
     const copied = sandbox.clipboardWrite.mock.calls[0][0] as string;
     expect(copied.split('\n')).toHaveLength(6);
+    // 默认与新版面板共用 timestamps=true，所以是带时间的 Copied!
+    expect(btn.textContent).toBe('Copied!');
+    expect(copied.split('\n')[0]).toMatch(/^0:02 /u);
+  });
+
+  it('Shift 点击把复制切换成不带时间，并写回共享偏好', async () => {
+    const sandbox = load2026({ expandedText: SUBTITLES });
+    const btn = api(sandbox).buildButton() as unknown as {
+      textContent: string;
+      onclick: (event: { shiftKey: boolean; altKey: boolean }) => Promise<void>;
+    };
+
+    await btn.onclick({ shiftKey: true, altKey: false });
+    const copied = sandbox.clipboardWrite.mock.calls[0][0] as string;
+    expect(copied.split('\n')[0]).toBe('Welcome everyone to Rails World');
     expect(btn.textContent).toBe('Copied (no timestamps)!');
+    expect(sandbox.__yttSharedPrefs?.timestamps).toBe(false);
+  });
+
+  it('Alt 点击复制章节，且不需要先打开字幕面板', async () => {
+    const sandbox = load2026({ expandedText: SUBTITLES });
+    const btn = api(sandbox).buildButton() as unknown as {
+      onclick: (event: { shiftKey: boolean; altKey: boolean }) => Promise<void>;
+    };
+    await btn.onclick({ shiftKey: false, altKey: true });
+    const copied = sandbox.clipboardWrite.mock.calls[0][0] as string;
+    expect(copied).toContain('28:14 Chapter 1');
+    expect(sandbox.alert).not.toHaveBeenCalled();
   });
 });

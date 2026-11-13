@@ -1,4 +1,4 @@
-import type { ExportFormat } from '../core/types';
+import type { ContentView, ExportFormat } from '../core/types';
 import { h, setText, show } from './dom';
 import { icon } from './icons';
 
@@ -19,6 +19,9 @@ export interface ToolbarView {
   cursor: number;
   showTimestamps: boolean;
   timestampsAvailable: boolean;
+  /** 当前展示/复制的是字幕还是章节 */
+  view: ContentView;
+  chaptersAvailable: boolean;
   copied: boolean;
   disabled: boolean;
 }
@@ -27,6 +30,7 @@ export interface ToolbarOptions {
   onQueryChange: (value: string) => void;
   onJump: (direction: 1 | -1) => void;
   onToggleTimestamps: () => void;
+  onToggleView: () => void;
   onCopy: () => void;
   onExport: (format: ExportFormat) => void;
 }
@@ -106,6 +110,19 @@ export function createToolbar(options: ToolbarOptions): ToolbarHandle {
     [icon('clock')],
   );
 
+  // 字幕 / 章节 视图切换：两个入口共用同一份 prefs，切换后原版按钮复制的内容也跟着变
+  const viewLabel = h('span', { text: '字幕' });
+  const viewBtn = h(
+    'button',
+    {
+      class:
+        'inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-[var(--ytt-border)] px-2 text-[11px] font-medium text-[var(--ytt-text-dim)] transition hover:bg-[var(--ytt-hover)] hover:text-[var(--ytt-text)] disabled:cursor-not-allowed disabled:opacity-40',
+      attrs: { type: 'button', 'aria-label': '切换字幕/章节' },
+      on: { click: () => options.onToggleView() },
+    },
+    [icon('list', 12), viewLabel],
+  );
+
   const copyBtn = h(
     'button',
     {
@@ -158,7 +175,7 @@ export function createToolbar(options: ToolbarOptions): ToolbarHandle {
   const element = h(
     'div',
     { class: 'flex h-[52px] shrink-0 items-center gap-1 border-b border-[var(--ytt-border)] px-2' },
-    [searchWrap, navWrap, tsBtn, copyBtn, exportWrap],
+    [searchWrap, navWrap, viewBtn, tsBtn, copyBtn, exportWrap],
   );
 
   let menuOpen = false;
@@ -221,10 +238,22 @@ export function createToolbar(options: ToolbarOptions): ToolbarHandle {
       setText(countEl, view.matchCount > 0 ? `${view.cursor + 1}/${view.matchCount}` : '');
       show(navWrap, view.matchCount > 0);
       tsBtn.disabled = !view.timestampsAvailable;
-      tsBtn.title = view.timestampsAvailable ? '显示/隐藏时间戳' : '这个字幕没有时间戳';
+      tsBtn.title = view.timestampsAvailable
+        ? `时间戳：${view.showTimestamps ? '开' : '关'}（显示与复制同步）`
+        : '这个字幕没有时间戳';
       tsBtn.classList.toggle('bg-[var(--ytt-accent-soft)]', view.showTimestamps);
       tsBtn.classList.toggle('text-[var(--ytt-accent)]', view.showTimestamps);
+
+      viewBtn.disabled = !view.chaptersAvailable;
+      viewBtn.title = view.chaptersAvailable ? '切换 字幕 / 章节' : '这个视频没有章节';
+      setText(viewLabel, view.view === 'chapters' ? '章节' : '字幕');
+      viewBtn.classList.toggle('border-[var(--ytt-accent)]', view.view === 'chapters');
+      viewBtn.classList.toggle('text-[var(--ytt-accent)]', view.view === 'chapters');
+
       copyBtn.disabled = view.disabled;
+      copyBtn.title = copyBtn.disabled
+        ? '复制全部'
+        : `复制${view.view === 'chapters' ? '章节' : '字幕'}（${view.showTimestamps ? '带时间' : '不带时间'}）`;
       exportBtn.disabled = view.disabled;
       // 播放时每 ~250ms 就会 render 一次，图标只在状态真的变了才重建
       if (view.copied !== lastCopied) {

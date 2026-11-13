@@ -10,8 +10,9 @@ import { readFileSync, writeFileSync } from 'node:fs';
  *   除此之外一字不改：按钮注入、onclick 全流程、SPA setInterval、
  *   setTimeout(addCopyButton, 2000)、copyToClipboard 全部照跑。
  *
- * user-script.js 现在含 2026 面板兼容逻辑（仅内部辅助函数 timecodeToMs /
- * subtitleRows，不导出）。下面 18 项导出名单保持不变，勿把新辅助函数加进去。
+ * user-script.js 含 2026 面板兼容逻辑，以及两个入口共用的
+ * 清洗/章节/复制格式化层（stripA11yDuration / readChapterRows / formatCopyText 等）。
+ * 导出名单里带 [共享] 的那几项由新版 TS 侧直接调用，不要删。
  */
 const src = readFileSync(new URL('../user-script.js', import.meta.url));
 const text = src.toString('utf8');
@@ -24,7 +25,10 @@ const EXPORT = `
         SEL, sleep, normalize, waitForElement, isVisible, countSegments, pickPanel,
         waitForSegments, openTranscriptPanel, segmentSelectorFor, collectFromList,
         collapseDuplicates, extractTranscript, extractFallback, normalizeLines,
-        copyToClipboard, buildButton, addCopyButton
+        copyToClipboard, buildButton, addCopyButton,
+        // [共享] 新版 TS 侧直接复用：清洗无障碍时长、章节、复制格式化
+        formatStamp, stripA11yDuration, textToRows, parseChapters,
+        readChapterRows, formatCopyText, sharedPrefs, setSharedPrefs
     };
 `;
 

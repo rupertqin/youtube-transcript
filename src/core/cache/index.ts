@@ -1,14 +1,16 @@
 import { looksLikeTranscript } from '../lines';
-import type { LogEvent, TranscriptLine } from '../types';
+import type { Chapter, LogEvent, TranscriptLine } from '../types';
 
 export const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /**
  * 缓存结构版本。调高即让所有旧条目失效：
  * v1 曾把「整页文本」当字幕写进来（推荐列表的时长徽标被误认成时间码）；
  * v2 又写进过「1 行 Transcript」（面板标题被当成唯一一行）。
+ * v4 新增无障碍时长清洗与 chapters 字段，旧缓存里还带着
+ * "33 minutes, 26 seconds"，必须抬版本让它失效。
  * 每次调整判定规则都必须抬版本，否则修好代码也会一直读到旧脏数据。
  */
-const CACHE_SCHEMA = 4;
+const CACHE_SCHEMA = 5;
 
 const DB_NAME = 'ytt-cache';
 const DB_VERSION = 1;
@@ -23,6 +25,8 @@ export interface CachedTranscript {
   title: string;
   source: string;
   lines: TranscriptLine[];
+  /** 章节单独存，不参与 looksLikeTranscript 校验 */
+  chapters?: Chapter[];
   showTimestamps: boolean;
   savedAt: number;
   expiresAt: number;

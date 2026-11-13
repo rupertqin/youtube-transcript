@@ -216,6 +216,21 @@ async function switchToTranscriptTab(doc: Document): Promise<string> {
 
   const tab = tabs[0] as HTMLElement;
   if (typeof tab.click !== 'function') return 'Transcript 标签不可点击';
+
+  // 已经选中就别再点。2026 的 chip 是开关式按钮：再点一次会把
+  // 整个字幕面板收起（用户看到的就是「原版字幕框消失」）。
+  const pressed = (
+    tab.getAttribute('aria-pressed') ||
+    tab.getAttribute('aria-selected') ||
+    ''
+  ).toLowerCase();
+  const cls = tab.getAttribute('class') || '';
+  const alreadyOn =
+    pressed === 'true' || /\b(selected|active|is-on)\b/iu.test(cls);
+  if (alreadyOn) {
+    return `Transcript 标签已选中，跳过点击（避免把它收起）<${tab.tagName.toLowerCase()}>`;
+  }
+
   tab.click();
   await sleep(300);
   return `已点击 Transcript 标签 <${tab.tagName.toLowerCase()} class="${(tab.getAttribute('class') || '').slice(0, 40)}">（匹配 ${tabs.length} 个）`;

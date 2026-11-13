@@ -3,6 +3,7 @@ import { fetchGetTranscript } from '../src/core/harvest/get-transcript';
 import { installTimedTextHook } from '../src/core/harvest/intercept';
 import { linesFromCapture } from '../src/core/harvest/sources';
 import { runRemoteSources } from '../src/core/harvest/sources';
+import { readStoryboardSpec } from '../src/core/harvest/player';
 import { log } from '../src/core/log';
 import type { HarvestContext } from '../src/core/types';
 import { createBridgeEndpoint } from '../src/platform/bridge';
@@ -22,6 +23,9 @@ export default defineContentScript({
     const endpoint = createBridgeEndpoint(window);
 
     endpoint.handle('PING', () => ({ ready: true, hookInstalledAt: hook.installedAt }));
+
+    // 章节截图用的雪碧图规格：playerResponse 只在 MAIN world 存在
+    endpoint.handle('STORYBOARD', () => readStoryboardSpec(window));
 
     // 用户手动打开原生 Transcript 面板时，YouTube 会自己请求 get_transcript；
     // 立刻通知 content script 重新加载，不需要用户再点一次「重试」

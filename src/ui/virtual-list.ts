@@ -15,6 +15,11 @@ export interface VirtualListHandle {
   scrollToTop(): void;
   /** 容器从隐藏变为可见（或被 resize）后重新测量 */
   relayout(): void;
+  /**
+   * 行数没变但行结构变了（例如开关时间戳、切换字幕/章节）时强制重渲染。
+   * setCount 在数量相同时会直接返回，靠这个方法才刷新得动。
+   */
+  refresh(): void;
   /** 已经挂载的行里按原始 index 取节点 */
   mountedRow(index: number): HTMLElement | undefined;
   eachMounted(fn: (index: number, row: HTMLElement) => void): void;
@@ -168,6 +173,12 @@ export function createVirtualList(options: VirtualListOptions): VirtualListHandl
     relayout() {
       lastWidth = scroller.clientWidth;
       resetAll();
+    },
+    refresh() {
+      // 保留滚动位置：时间戳开关不该把列表弹回顶部
+      const top = scroller.scrollTop;
+      resetAll();
+      scroller.scrollTop = top;
     },
     mountedRow: (index) => mounted.get(index),
     eachMounted(fn) {

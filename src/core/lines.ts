@@ -25,6 +25,29 @@ export function findActiveIndex(lines: TranscriptLine[], seconds: number): numbe
   return best;
 }
 
+/**
+ * 章节高亮：真实播放位置落在哪个章节区间。
+ *
+ * 必须传**真实位置**（positionMs），不能传「当前字幕行的 start」——
+ * 章节 28:14 对应的那条字幕行可能是 28:09，用行起点比较会永远命中上一章。
+ */
+export function findChapterIndex(chapters: TranscriptLine[], positionMs: number): number {
+  if (chapters.length === 0 || positionMs < 0) return -1;
+  let low = 0;
+  let high = chapters.length - 1;
+  let best = -1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (chapters[mid].start <= positionMs) {
+      best = mid;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return best;
+}
+
 export function totalDuration(lines: TranscriptLine[]): number {
   if (lines.length === 0) return 0;
   const last = lines[lines.length - 1];

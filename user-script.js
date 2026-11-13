@@ -162,10 +162,21 @@
             return panel;
         }
 
-        const buttons = Array.from(document.querySelectorAll('button, yt-button-shape button'));
+        const buttons = Array.from(document.querySelectorAll('button, yt-button-shape button'))
+            // 我们自己的按钮（Copy Transcript / Transcript v2.x）绝不能点
+            .filter((b) => b.id !== 'ytt-entry-btn' && b.id !== 'copy-transcript-btn');
+
+        // Transcript 标签是开关式 chip：已选中时再点一次会把面板收起，
+        // 用户看到的就是「原版字幕框消失了」。已选中的一律跳过。
+        const isActiveChip = (b) => {
+            const pressed = (b.getAttribute('aria-pressed') || b.getAttribute('aria-selected') || '').toLowerCase();
+            if (pressed === 'true') return true;
+            return /\b(selected|active|is-on)\b/i.test(b.getAttribute('class') || '');
+        };
+
         const trigger =
             buttons.find((b) => /show\s*transcript/i.test(b.textContent || '')) ||
-            buttons.find((b) => /transcript/i.test(b.textContent || ''));
+            buttons.find((b) => /transcript/i.test(b.textContent || '') && !isActiveChip(b));
 
         if (trigger) {
             trigger.click();
@@ -308,6 +319,237 @@
             .join('\n');
     }
 
+    /* ------------------------------------------------------------------ *
+     * 共享层：原版按钮与新版面板**调用同一份函数**，保证两个入口完全同步。
+     * 由 scripts/sync-legacy.mjs 导出到 __yttLegacyV19，TS 侧直接复用。
+     * ------------------------------------------------------------------ */
+
+    /** m:ss / h:mm:ss，与新版 formatTimestamp 保持同一格式。 */
+    function formatStamp(ms) {
+        if (!Number.isFinite(ms) || ms < 0) return '--:--';
+        const total = Math.floor(ms / 1000);
+        const h = Math.floor(total / 3600);
+        const m = Math.floor((total % 3600) / 60);
+        const s = total % 60;
+        return h > 0
+            ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+            : `${m}:${String(s).padStart(2, '0')}`;
+    }
+
+    /**
+     * YouTube 给每个时间点配了一段无障碍时长文本，复制时会一起带出来：
+     *   "33:26 33 minutes, 26 seconds 正文"   → 后面的 33 分 26 秒就是 33:26 的复述
+     *   "3:323 minutes, 32 secondsI don't…"  → 中间没有空格，粘在一起
+     *
+     * 判定规则：**数值必须和时间码完全一致才删**。
+     * 这样 "1:23 we waited 5 minutes" 里的 5 minutes 不会被动到，
+     * 只有真正的复述（33:26 ↔ 33 minutes, 26 seconds）才去掉。
+     */
+    const DURATION_UNITS = [
+        ['hours?|hrs?', 3600000], ['minutes?|mins?', 60000], ['seconds?|secs?', 1000],
+        ['小时|小時|时|時', 3600000], ['分钟|分鐘', 60000], ['秒', 1000]
+    ];
+    const DURATION_WORDS = DURATION_UNITS.map(([w]) => w).join('|');
+    const DURATION_PHRASE = `(?:\\d{1,2}\\s*(?:${DURATION_WORDS})[\\s,，]*)+`;
+    const DURATION_AFTER_STAMP = new RegExp(
+        `(\\d{1,2}:\\d{2}(?::\\d{2})?)\\s*(${DURATION_PHRASE})`, 'giu'
+    );
+    const DURATION_ONLY_LINE = new RegExp(`^${DURATION_PHRASE}$`, 'iu');
+    const DURATION_TOKEN = new RegExp(`(\\d{1,2})\\s*(${DURATION_WORDS})`, 'giu');
+
+    function timecodeMs(time) {
+        const bits = String(time || '').split(':').map(Number);
+        if (bits.some((n) => !Number.isFinite(n))) return -1;
+        return bits.length === 3
+            ? (bits[0] * 3600 + bits[1] * 60 + bits[2]) * 1000
+            : (bits[0] * 60 + bits[1]) * 1000;
+    }
+
+    /** 把 "33 minutes, 26 seconds" 这样的复述换算成毫秒；认不出单位返回 -1。 */
+    function spokenDurationMs(phrase) {
+        let total = 0;
+        let seen = false;
+        for (const match of String(phrase || '').matchAll(DURATION_TOKEN)) {
+            const unit = match[2].toLowerCase();
+            const entry = DURATION_UNITS.find(([words]) => new RegExp(`^(?:${words})$`, 'iu').test(unit));
+            if (!entry) return -1;
+            total += Number(match[1]) * entry[1];
+            seen = true;
+        }
+        return seen ? total : -1;
+    }
+
+    const DURATION_AT_START = new RegExp(`^${DURATION_PHRASE}`, 'iu');
+
+    /**
+     * @param expectedMs 已知该行起点（毫秒）时传入。结构化行的时间码已被
+     *   解析到 start 字段、正文里只剩那串复述，这时靠 expectedMs 才能对上。
+     */
+    function stripA11yDuration(text, expectedMs) {
+        const raw = String(text || '');
+        let cleaned = raw.replace(DURATION_AFTER_STAMP, (match, stamp, phrase) => {
+            // 只在前面的时间码和后面的复述数值一致时才删
+            return timecodeMs(stamp) === spokenDurationMs(phrase) ? `${stamp} ` : match;
+        });
+
+        // 行首单独一段复述（时间码在 start 里，不在这段文本里）
+        const lead = DURATION_AT_START.exec(cleaned);
+        if (lead && Number.isFinite(expectedMs) && expectedMs >= 0) {
+            if (spokenDurationMs(lead[0]) === expectedMs) cleaned = cleaned.slice(lead[0].length);
+        }
+
+        return normalizeLines(cleaned)
+            .split('\n')
+            .filter((line) => !DURATION_ONLY_LINE.test(line.trim()))
+            .map((line) => normalize(line))
+            .join('\n');
+    }
+
+    /** 把原版那种 "时间码 正文" 纯文本转成结构化行（毫秒）。 */
+    function textToRows(text) {
+        return normalizeLines(text)
+            .split('\n')
+            .map((line) => {
+                const match = /^(\d{1,2}:\d{2}(?::\d{2})?)\s*(.*)$/u.exec(line);
+                if (!match) return { start: -1, dur: 0, text: line };
+                return { start: timecodeToMs(match[1]), dur: 0, text: match[2] };
+            })
+            .filter((row) => row.text);
+    }
+
+    /** 章节：按时间码切分，剥掉无障碍时长；去重、按时间递增。 */
+    function parseChapters(text) {
+        const parts = normalizeLines(stripA11yDuration(text))
+            .split(/\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*/u);
+        const seen = new Set();
+        const out = [];
+        for (let i = 1; i < parts.length; i += 2) {
+            const ms = timecodeToMs(parts[i]);
+            const label = normalize(parts[i + 1]);
+            if (ms < 0 || !label || label.length > 200 || seen.has(ms)) continue;
+            seen.add(ms);
+            out.push({ start: ms, dur: 0, text: label });
+        }
+        return out.sort((a, b) => a.start - b.start);
+    }
+
+    /**
+     * 只认「章节面板」。绝不能写 [visibility*="EXPANDED"] —— 那块正是字幕面板，
+     * 字幕行间隔几秒，按 30s 抽样后也能凑出十几行，会被误当章节。
+     * 真实 dump 里章节面板是 target-id="engagement-panel-macro-markers-description-chapters"。
+     */
+    const CHAPTER_PANELS = [
+        'ytd-engagement-panel-section-list-renderer[target-id*="chapter"]',
+        'ytd-engagement-panel-section-list-renderer[target-id*="macro-markers"]',
+        '[target-id*="macro-markers"]',
+        'ytd-macro-markers-list-item-renderer'
+    ].join(',');
+
+    /** 章节条目自身的容器：面板认不出时，把所有条目文本拼起来再切。 */
+    const CHAPTER_ITEMS = [
+        'ytd-macro-markers-list-item-renderer',
+        'yt-macro-markers-list-item-view-model',
+        '[class*="macro-markers-list-item"]'
+    ].join(',');
+
+    /**
+     * 从一段面板文本里切章节。
+     *
+     * 防「字幕被当成章节」的判据：字幕每隔几秒一行，按 30s 抽样后
+     * 间隔会**整齐地堆在 30s 附近**（每次都是「越过阈值后的第一行」）。
+     * 真实章节的间隔是分钟级且参差不齐。所以：
+     *   - 若 ≥70% 的间隔都落在 30~40s，判定为字幕抽样，丢弃；
+     *   - 章节这么密的视频几乎不存在，这条不会误伤真实章节。
+     */
+    function parseChapterList(raw, minGapMs, maxRows) {
+        const kept = [];
+        for (const row of parseChapters(raw)) {
+            if (kept.length === 0 || row.start - kept[kept.length - 1].start >= minGapMs) {
+                kept.push(row);
+            }
+        }
+        if (kept.length < 2 || kept.length > maxRows) return [];
+
+        const gaps = [];
+        for (let i = 1; i < kept.length; i += 1) gaps.push(kept[i].start - kept[i - 1].start);
+        const sampled = gaps.filter((gap) => gap >= 30000 && gap <= 40000).length;
+        if (gaps.length >= 3 && sampled / gaps.length >= 0.7) return [];
+        return kept;
+    }
+
+    function readChapterRows(doc) {
+        if (!doc || typeof doc.querySelectorAll !== 'function') return [];
+        const MIN_GAP = 30000;
+        const MAX_ROWS = 80;
+        try {
+            // ① 整块章节面板（innerText 一次读完，顺序天然正确）
+            for (const el of Array.from(doc.querySelectorAll(CHAPTER_PANELS)).slice(0, 16)) {
+                const raw = el.innerText || el.textContent || '';
+                if (!raw || raw.length > 20000) continue;
+                const rows = parseChapterList(raw, MIN_GAP, MAX_ROWS);
+                if (rows.length > 0) return rows;
+            }
+
+            // ② 面板结构变了（只剩条目节点）：按 DOM 顺序把条目文本拼起来
+            const items = Array.from(doc.querySelectorAll(CHAPTER_ITEMS)).slice(0, 120);
+            if (items.length >= 2) {
+                const raw = items.map((el) => normalize(el.innerText || el.textContent || '')).join('\n');
+                const rows = parseChapterList(raw, MIN_GAP, MAX_ROWS);
+                if (rows.length > 0) return rows;
+            }
+        } catch { /* 读取失败就当没有章节 */ }
+        return [];
+    }
+
+    /**
+     * 两个入口共用的复制格式化。rows/chapters 都是 {start(ms), text}。
+     * timestamps=false 时去掉时间码前缀；view='chapters' 且有章节时复制章节。
+     */
+    function formatCopyText(rows, options) {
+        const opts = options || {};
+        const withTime = opts.timestamps !== false;
+        const chapters = Array.isArray(opts.chapters) ? opts.chapters : [];
+        const useChapters = opts.view === 'chapters' && chapters.length > 0;
+        const source = useChapters ? chapters : (Array.isArray(rows) ? rows : []);
+        const out = [];
+
+        for (const row of source) {
+            const label = stripA11yDuration(row.text || '', row.start);
+            if (!label) continue;
+            out.push(withTime && row.start >= 0 ? `${formatStamp(row.start)} ${label}` : label);
+        }
+        return out.join('\n');
+    }
+
+    /** 共享偏好：新版 UI 写 globalThis + localStorage，原版按钮读同一份。 */
+    const PREFS_KEY = 'ytt-prefs';
+    function sharedPrefs() {
+        const defaults = { timestamps: true, view: 'lines' };
+        const fromGlobal = globalThis.__yttSharedPrefs;
+        if (fromGlobal && typeof fromGlobal === 'object') return { ...defaults, ...fromGlobal };
+        try {
+            const raw = localStorage.getItem(PREFS_KEY);
+            if (raw) return { ...defaults, ...JSON.parse(raw) };
+        } catch { /* 独立安装时没有偏好存储 */ }
+        return defaults;
+    }
+
+    /** 原版按钮上的 Shift/Alt 快捷切换也要写回共享偏好，让新版面板同步。 */
+    function setSharedPrefs(patch) {
+        const next = { ...sharedPrefs(), ...patch };
+        globalThis.__yttSharedPrefs = next;
+        try {
+            if (typeof globalThis.__yttSetSharedPrefs === 'function') {
+                globalThis.__yttSetSharedPrefs(patch);
+            } else {
+                const raw = localStorage.getItem(PREFS_KEY);
+                const stored = raw ? JSON.parse(raw) : {};
+                localStorage.setItem(PREFS_KEY, JSON.stringify({ ...stored, ...patch }));
+            }
+        } catch { /* 写不进去也至少本次复制已生效 */ }
+        return next;
+    }
+
     async function copyToClipboard(text) {
         try {
             await navigator.clipboard.writeText(text);
@@ -359,20 +601,52 @@
             btn.disabled = false;
         };
 
-        btn.onclick = async () => {
+        btn.onclick = async (event) => {
             btn.disabled = true;
             btn.textContent = 'Opening transcript...';
 
             try {
-                const panel = await openTranscriptPanel();
-                if (!panel) {
-                    alert('Could not find the transcript panel. This video may not have a transcript.');
-                    return reset();
+                // 与新版面板共用同一份偏好。Shift 点击 = 反转时间戳；
+                // Alt 点击 = 反转 字幕/章节。改动写回共享偏好，两边同步。
+                let prefs = sharedPrefs();
+                if (event && event.shiftKey) {
+                    const patch = { timestamps: !prefs.timestamps };
+                    setSharedPrefs(patch);
+                    prefs = { ...prefs, ...patch };
+                }
+                if (event && event.altKey) {
+                    const patch = { view: prefs.view === 'chapters' ? 'lines' : 'chapters' };
+                    setSharedPrefs(patch);
+                    prefs = { ...prefs, ...patch };
                 }
 
-                btn.textContent = 'Extracting transcript...';
-                const { text, showTimestamps } = await extractTranscript(panel);
+                const chapters = readChapterRows(document);
+                const options = { ...prefs, chapters };
+                let rows;
 
+                if (prefs.view === 'chapters' && chapters.length > 0) {
+                    // 章节是页面独立数据，不必先打开字幕面板（那个面板可能打不开）
+                    rows = chapters;
+                    btn.textContent = 'Extracting transcript...';
+                } else {
+                    const panel = await openTranscriptPanel();
+                    if (!panel) {
+                        alert('Could not find the transcript panel. This video may not have a transcript.');
+                        return reset();
+                    }
+
+                    btn.textContent = 'Extracting transcript...';
+                    const { text: raw } = await extractTranscript(panel);
+                    if (!raw) {
+                        alert('Transcript is empty or still loading. Try again in a moment.');
+                        return reset();
+                    }
+                    rows = textToRows(raw);
+                    options.view = 'lines';
+                }
+
+                // 与新版面板调用同一个 formatCopyText：清洗、开关、章节完全一致
+                const text = formatCopyText(rows, options);
                 if (!text) {
                     alert('Transcript is empty or still loading. Try again in a moment.');
                     return reset();
@@ -383,7 +657,7 @@
                     return reset();
                 }
 
-                btn.textContent = showTimestamps ? 'Copied!' : 'Copied (no timestamps)!';
+                btn.textContent = prefs.timestamps ? 'Copied!' : 'Copied (no timestamps)!';
                 setTimeout(() => reset(), 2000);
             } catch (err) {
                 console.error('[copy-transcript] extraction failed:', err);

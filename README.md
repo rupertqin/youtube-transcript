@@ -76,6 +76,10 @@ Chapters 标签页**，字幕行根本没渲染。原版 `SEL.panels` 要求
 - ① 快照为空时 `switchToTranscriptTab()` **精确点击文案恰好是 `Transcript` 的标签**，
   让 YouTube 自己渲染字幕行。不会误点 `Show transcript` / `Copy Transcript` /
   `Transcript v2.x`（我们自己的按钮）
+- **已选中的标签绝不再点**：2026 的 chip 是开关式按钮，再点一次会把整个字幕框收起
+  （用户看到的就是「原版字幕框消失」）。`aria-pressed`/`aria-selected` 为 true、
+  或 class 含 `selected`/`active`/`is-on` 时直接跳过；`openTranscriptPanel()` 的
+  兜底按钮搜索同样排除我们自己的两个按钮和已激活的 chip
 - ② 每 250ms 轮询快照，最多 12 次，等虚拟列表把行渲染出来
 - ③ 仍读不到、且面板**未**展开时才走原版 `openTranscriptPanel()` 兜底；
   面板已 `EXPANDED` 时跳过它，避免再次点 `Show transcript` 把面板关掉
@@ -114,10 +118,62 @@ Chapters 标签页**，字幕行根本没渲染。原版 `SEL.panels` 要求
   `copyToClipboard()`、`buildButton()`、onclick 状态机、三处 alert、
   `Copied!` 文案、按钮样式、SPA `setInterval` **一行未改**
 
+### 两个入口共用一套复制逻辑（chapters / 时间戳开关 / 时长清洗）
+
+原版 `Copy Transcript` 按钮与新版面板**不是两份实现**：清洗、章节解析、复制格式化
+都写在 `user-script.js` 里，由 `scripts/sync-legacy.mjs` 导出到 `__yttLegacyV19`，
+新版 TS 侧只做类型转发（`src/core/format/copy.ts`）。因此两边输出必然一致。
+
+- **干净文本**：YouTube 给每个时间点配了一段无障碍复述（`33:26 33 minutes, 26 seconds`、
+  `3:323 minutes, 32 secondsI don't…` 这种粘连），`stripA11yDuration()` 会去掉它。
+  判据是**数值必须和时间码完全一致**，所以 `1:23 we waited 5 minutes` 这种真实台词不动。
+  清洗在进 state 前做一次（显示/搜索/复制/导出同一份），复制时再按行起点兜一次。
+- **时间戳开关**：工具栏时钟按钮 = `prefs.timestamps`，同时控制显示与复制；
+  原版按钮读同一份偏好。原版按钮上 **Shift+点击** 反转时间戳、**Alt+点击** 反转字幕/章节，
+  改完写回共享偏好，新版面板会跟着重渲染。
+- **chapters**：`readChapterRows()` 只认章节面板
+  （`target-id*="chapter"` / `*="macro-markers"`、`ytd-macro-markers-list-item-renderer`），
+  按 30 秒间隔抽样；**绝不能加 `[visibility*="EXPANDED"]`** —— 那正是字幕面板，
+  字幕行按 30s 抽样后会凑出十几行，把字幕误判成章节。章节独立存在 `PanelState.chapters`，
+  不参与 `looksLikeTranscript()` 校验；抓取失败时章节照样能看、能复制。
+- **视图切换**：工具栏「字幕 / 章节」按钮切换 `prefs.view`；可切换时复制、导出（`-chapters.txt`）、
+  搜索、播放高亮全部跟着换数据源。当前视频没有章节时自动回退到字幕视图。
+- **点击时间点**：`TranscriptLine.start` 是毫秒，`video.currentTime` 是秒，
+  `row.ts` 里换算后再 seek（之前直接传毫秒，`1:05` 会跳到 65000 秒）。
+
+### 章节截图 / 高亮 / 开关即时生效
+
+**章节截图**来自 YouTube 的 storyboard 雪碧图（`playerResponse.storyboards.playerStoryboardSpecRenderer.spec`），
+按时间点裁切，不额外发请求：
+
+- 规格串 `URL|帧宽#帧高#总帧数#列#行#帧间隔ms#图集名#签名`，URL 里 `$L` = 档位、`$N` = 图集名
+- **`$L` 必须是「已解析档位里的序号」，不能用原始段号**。URL 后面常挂着一个 `$M`
+  之类的签名占位段，拿段号当 `$L` 会整体偏一位 → 请求不存在的 L2/M2.jpg → 缩略图全空
+- 跳过 `间隔=0` 的档位（那是整段海报，无法按时间定位）
+- 宽、高、偏移**必须共用同一个 scale**：`56/80*45 = 31.5`，四舍五入成 32 会让裁切漏出下一行
+- 只在章节视图渲染；字幕视图几千行，逐行拉图没有意义
+- 扩展的 content script 在 isolated world 读不到 `playerResponse`，走 `STORYBOARD` 桥到 MAIN world；
+  油猴本身在页面上下文，直接读。取不到就不显示，不影响章节本身
+
+**章节高亮**必须用真实播放位置 `positionMs`：
+
+```ts
+// 错的：state.lines[activeIndex].start 是字幕行起点，早于章节起点
+// 章节 28:14 对应的字幕行可能是 28:09 → 永远高亮上一章
+findChapterIndex(chapters, state.positionMs);
+```
+
+`timeupdate` 只把 `positionMs` 按秒取整写入（无章节时不写，避免白白多渲染），
+`seek()` 立刻写入，所以点章节的瞬间高亮就跳到目标，不用等下一个 `timeupdate`。
+
+**时间戳开关不生效**的根因在虚拟列表：开关改变行结构但不改变行数，
+而 `setCount()` 在数量相同时直接 `return`，已挂载的行永远不会重建。
+新增 `refresh()` 强制重渲染并保留滚动位置，面板比较行数后择一调用。
+
 ### 保证能运行的验收
 
 `tests/verbatim-runtime.test.ts` 用 `node:vm` **真实执行整份 `verbatim-runtime.js`**，断言
-18 个内部函数全部挂载、且原版 `extractFallback` 能把带时间码的面板文本切出字幕行。
+原版 18 项 + 共享层 8 项全部挂载、且原版 `extractFallback` 能把带时间码的面板文本切出字幕行。
 `tests/legacy.test.ts` 另有「逐字节一致」与「导出名单每个名字都在原版里声明过」两条静态校验，
 防止同步漂移或 IIFE 抛 `ReferenceError`。
 

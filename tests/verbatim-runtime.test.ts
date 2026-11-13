@@ -33,15 +33,23 @@ function loadRuntime(): Record<string, unknown> {
   return sandbox;
 }
 
-const EXPECTED = [
+const ORIGINAL_API = [
   'SEL', 'sleep', 'normalize', 'waitForElement', 'isVisible', 'countSegments', 'pickPanel',
   'waitForSegments', 'openTranscriptPanel', 'segmentSelectorFor', 'collectFromList',
   'collapseDuplicates', 'extractTranscript', 'extractFallback', 'normalizeLines',
   'copyToClipboard', 'buildButton', 'addCopyButton',
 ];
 
+/** 新增的共享层：两个入口调用同一份实现，不是第二套逻辑 */
+const SHARED_API = [
+  'formatStamp', 'stripA11yDuration', 'textToRows', 'parseChapters',
+  'readChapterRows', 'formatCopyText', 'sharedPrefs', 'setSharedPrefs',
+];
+
+const EXPECTED = [...ORIGINAL_API, ...SHARED_API];
+
 describe('整份原版 v1.9 运行时', () => {
-  it('执行到底，18 个内部函数全部可用（之前移植版漏了按钮/剪贴板那一层）', () => {
+  it('执行到底，原版 18 项 + 共享层 8 项全部可用', () => {
     const sandbox = loadRuntime();
     const api = sandbox.__yttLegacyV19 as Record<string, unknown>;
     expect(api).toBeTruthy();
@@ -49,11 +57,12 @@ describe('整份原版 v1.9 运行时', () => {
     for (const name of EXPECTED.slice(3)) expect(typeof api[name]).toBe('function');
   });
 
-  it('导出名单恰好 18 项，2026 内部辅助函数没有泄漏到导出里', () => {
+  it('导出名单恰好是原版 18 项 + 共享层，2026 内部辅助函数没有泄漏', () => {
     const api = loadRuntime().__yttLegacyV19 as Record<string, unknown>;
     expect(Object.keys(api)).toEqual(EXPECTED);
     expect(api.subtitleRows).toBeUndefined();
     expect(api.timecodeToMs).toBeUndefined();
+    expect(api.DURATION_PHRASE).toBeUndefined();
   });
 
   it('原版 extractFallback 能把带时间码的面板文本切成字幕行', () => {
