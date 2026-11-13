@@ -1,10 +1,18 @@
+import type { LangChoice } from '../core/langs';
 import type { ContentView, ExportFormat } from '../core/types';
 import { h, setText, show } from './dom';
 import { icon } from './icons';
 
 const ICON_BTN =
-  'inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--ytt-text-dim)] transition ' +
+  'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--ytt-text-dim)] transition ' +
   'hover:bg-[var(--ytt-hover)] hover:text-[var(--ytt-text)] active:scale-95 ' +
+  'disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent';
+
+/** 第二行里带文字的小胶囊（视图 / 语言），和图标按钮同高 */
+const PILL_BTN =
+  'inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-[var(--ytt-border)] ' +
+  'px-2.5 text-[13px] font-medium text-[var(--ytt-text-dim)] transition ' +
+  'hover:bg-[var(--ytt-hover)] hover:text-[var(--ytt-text)] ' +
   'disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent';
 
 const EXPORTS: { format: ExportFormat; label: string; hint: string }[] = [
@@ -22,6 +30,13 @@ export interface ToolbarView {
   /** 当前展示/复制的是字幕还是章节 */
   view: ContentView;
   chaptersAvailable: boolean;
+  /** 当前选中的字幕语言；auto = 同音频（两个按钮都不高亮） */
+  lang: LangChoice;
+  /** 中/英至少有一个可用时才显示这组按钮；两个都没有就整组隐藏 */
+  showLangGroup: boolean;
+  /** 能不能出中文 / 英文字幕（原生轨道或机翻目标）。不能则该按钮 disabled */
+  zhAvailable: boolean;
+  enAvailable: boolean;
   copied: boolean;
   disabled: boolean;
 }
@@ -31,6 +46,8 @@ export interface ToolbarOptions {
   onJump: (direction: 1 | -1) => void;
   onToggleTimestamps: () => void;
   onToggleView: () => void;
+  /** 选中的按钮再点一次 = 回到「同音频」 */
+  onSelectLang: (choice: 'zh' | 'en') => void;
   onCopy: () => void;
   onExport: (format: ExportFormat) => void;
 }
@@ -47,7 +64,7 @@ export interface ToolbarHandle {
 export function createToolbar(options: ToolbarOptions): ToolbarHandle {
   const searchInput = h('input', {
     class:
-      'h-full min-w-0 flex-1 bg-transparent text-[12.5px] text-[var(--ytt-text)] placeholder:text-[var(--ytt-text-mute)]',
+      'h-full min-w-0 flex-1 bg-transparent text-[14px] text-[var(--ytt-text)] placeholder:text-[var(--ytt-text-mute)]',
     attrs: {
       type: 'text',
       placeholder: '搜索字幕…',
@@ -61,7 +78,7 @@ export function createToolbar(options: ToolbarOptions): ToolbarHandle {
   searchGlyph.style.color = 'var(--ytt-text-mute)';
 
   const kbdHint = h('kbd', {
-    class: 'shrink-0 rounded border border-[var(--ytt-border)] px-1 text-[10px] text-[var(--ytt-text-mute)]',
+    class: 'shrink-0 rounded border border-[var(--ytt-border)] px-1 text-[11px] text-[var(--ytt-text-mute)]',
     text: '⌘K',
   });
 
@@ -75,16 +92,17 @@ export function createToolbar(options: ToolbarOptions): ToolbarHandle {
   );
   show(clearBtn, false);
 
+  // 原版的搜索框是**胶囊**：40px 高、全圆角、左右 14px。照着来，别用方角。
   const searchWrap = h(
     'div',
     {
       class:
-        'flex h-8 min-w-0 flex-1 items-center gap-1.5 rounded-lg border border-transparent bg-[var(--ytt-surface)] px-2 transition focus-within:border-[var(--ytt-border-strong)] focus-within:bg-[var(--ytt-bg-elev)]',
+        'flex h-10 min-w-0 flex-1 items-center gap-2 rounded-full border border-transparent bg-[var(--ytt-surface)] px-3.5 transition focus-within:border-[var(--ytt-border-strong)] focus-within:bg-[var(--ytt-bg-elev)]',
     },
     [searchGlyph, searchInput, kbdHint, clearBtn],
   );
 
-  const countEl = h('span', { class: 'px-1 text-[11px] tabular-nums text-[var(--ytt-text-mute)]' });
+  const countEl = h('span', { class: 'px-1 text-[12px] tabular-nums text-[var(--ytt-text-mute)]' });
   const navWrap = h('div', { class: 'flex shrink-0 items-center gap-0.5 tabular-nums' }, [
     countEl,
     h(
@@ -110,17 +128,37 @@ export function createToolbar(options: ToolbarOptions): ToolbarHandle {
     [icon('clock')],
   );
 
+  // 字幕语言：中文 / English 两个按钮，都不选中 = 同音频（默认）。
+  // 视频给不了的语言按钮置灰（不隐藏：直接消失会让人以为是 bug）。
+  const langPill = (text: string, choice: 'zh' | 'en', label: string): HTMLButtonElement =>
+    h(
+      'button',
+      {
+        class: PILL_BTN,
+        attrs: { type: 'button', 'aria-label': label, title: label },
+        on: { click: () => options.onSelectLang(choice) },
+      },
+      [h('span', { text })],
+    ) as HTMLButtonElement;
+
+  const zhBtn = langPill('中', 'zh', '中文字幕');
+  const enBtn = langPill('EN', 'en', 'English subtitles');
+  const langWrap = h(
+    'div',
+    { class: 'inline-flex shrink-0 items-center gap-1', attrs: { 'aria-label': '字幕语言' } },
+    [icon('globe', 12), zhBtn, enBtn],
+  );
+
   // 字幕 / 章节 视图切换：两个入口共用同一份 prefs，切换后原版按钮复制的内容也跟着变
   const viewLabel = h('span', { text: '字幕' });
   const viewBtn = h(
     'button',
     {
-      class:
-        'inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-[var(--ytt-border)] px-2 text-[11px] font-medium text-[var(--ytt-text-dim)] transition hover:bg-[var(--ytt-hover)] hover:text-[var(--ytt-text)] disabled:cursor-not-allowed disabled:opacity-40',
+      class: PILL_BTN,
       attrs: { type: 'button', 'aria-label': '切换字幕/章节' },
       on: { click: () => options.onToggleView() },
     },
-    [icon('list', 12), viewLabel],
+    [icon('list', 13), viewLabel],
   );
 
   const copyBtn = h(
@@ -135,7 +173,7 @@ export function createToolbar(options: ToolbarOptions): ToolbarHandle {
 
   const exportMenu = h('div', {
     class:
-      'absolute right-0 top-8 z-30 hidden w-[152px] overflow-hidden rounded-lg border border-[var(--ytt-border)] bg-[var(--ytt-bg-elev)] py-1 shadow-[0_16px_40px_-12px_rgba(0,0,0,0.65)]',
+      'absolute right-0 top-9 z-30 hidden w-[168px] overflow-hidden rounded-xl border border-[var(--ytt-border-strong)] bg-[var(--ytt-bg-elev)] py-1.5 shadow-[0_16px_40px_-12px_rgba(0,0,0,0.65)]',
   });
 
   for (const item of EXPORTS) {
@@ -144,7 +182,7 @@ export function createToolbar(options: ToolbarOptions): ToolbarHandle {
         'button',
         {
           class:
-            'flex w-full items-center justify-between px-3 py-1.5 text-left text-[12px] text-[var(--ytt-text-dim)] transition hover:bg-[var(--ytt-hover)] hover:text-[var(--ytt-text)]',
+            'flex w-full items-center justify-between px-3 py-1.5 text-left text-[13px] text-[var(--ytt-text-dim)] transition hover:bg-[var(--ytt-hover)] hover:text-[var(--ytt-text)]',
           attrs: { type: 'button' },
           on: {
             click: () => {
@@ -155,7 +193,7 @@ export function createToolbar(options: ToolbarOptions): ToolbarHandle {
         },
         [
           h('span', { text: item.label }),
-          h('span', { class: 'text-[10px] text-[var(--ytt-text-mute)]', text: item.hint }),
+          h('span', { class: 'text-[11px] text-[var(--ytt-text-mute)]', text: item.hint }),
         ],
       ),
     );
@@ -172,10 +210,34 @@ export function createToolbar(options: ToolbarOptions): ToolbarHandle {
 
   const exportWrap = h('div', { class: 'relative' }, [exportBtn, exportMenu]);
 
+  /**
+   * 两行而不是一行。
+   *
+   * 右栏只有 ~400px，原来 7 个控件挤在同一行：搜索框被压到 100px 出头，
+   * 中/EN、列表、时间戳、复制、导出挤成一条，视觉上非常吵。
+   * 拆成「搜索」+「操作」两行后每个控件都回到舒适宽度，代价只有 40px 高度。
+   */
+  const searchRow = h('div', { class: 'flex h-10 items-center gap-2' }, [searchWrap, navWrap]);
+
+  const divider = h('span', {
+    class: 'mx-0.5 h-5 w-px shrink-0 bg-[var(--ytt-border)]',
+    attrs: { 'aria-hidden': 'true' },
+  });
+
+  const actionRow = h('div', { class: 'flex h-9 items-center gap-1.5' }, [
+    viewBtn,
+    langWrap,
+    divider,
+    h('span', { class: 'flex-1' }),
+    tsBtn,
+    copyBtn,
+    exportWrap,
+  ]);
+
   const element = h(
     'div',
-    { class: 'flex h-[52px] shrink-0 items-center gap-1 border-b border-[var(--ytt-border)] px-2' },
-    [searchWrap, navWrap, viewBtn, tsBtn, copyBtn, exportWrap],
+    { class: 'flex shrink-0 flex-col gap-1.5 border-b border-[var(--ytt-border)] px-4 pb-3 pt-3' },
+    [searchRow, actionRow],
   );
 
   let menuOpen = false;
@@ -243,6 +305,21 @@ export function createToolbar(options: ToolbarOptions): ToolbarHandle {
         : '这个字幕没有时间戳';
       tsBtn.classList.toggle('bg-[var(--ytt-accent-soft)]', view.showTimestamps);
       tsBtn.classList.toggle('text-[var(--ytt-accent)]', view.showTimestamps);
+
+      // 中/英都没字幕 → 整组隐藏，不给两个永远点不动的按钮
+      show(langWrap, view.showLangGroup);
+      for (const [btn, choice, available, missingHint] of [
+        [zhBtn, 'zh', view.zhAvailable, '这个视频没有中文字幕'],
+        [enBtn, 'en', view.enAvailable, '这个视频没有英文字幕'],
+      ] as const) {
+        // 有字幕但缺这个语言：按钮留着但禁用，悬停说明原因 —— 直接消失会让人以为是 bug
+        btn.disabled = !available;
+        btn.title = available ? btn.getAttribute('aria-label') ?? '' : missingHint;
+        const on = available && view.lang === choice;
+        btn.classList.toggle('border-[var(--ytt-accent)]', on);
+        btn.classList.toggle('text-[var(--ytt-accent)]', on);
+        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      }
 
       viewBtn.disabled = !view.chaptersAvailable;
       viewBtn.title = view.chaptersAvailable ? '切换 字幕 / 章节' : '这个视频没有章节';

@@ -2,16 +2,12 @@ import { getSelectors } from './selectors';
 import { waitForElement } from './wait';
 
 export const ENTRY_BUTTON_ID = 'ytt-entry-btn';
-/** 1.x 原版按钮沿用它自己的 id，方便和原脚本对照 */
-export const LEGACY_BUTTON_ID = 'copy-transcript-btn';
 
 export interface EntryButtonOptions {
   doc: Document;
   label?: string;
   title?: string;
   id?: string;
-  /** primary = 红色渐变（新版）；ghost = 描边中性色（原版对比） */
-  variant?: 'primary' | 'ghost';
   /** 徽标文案；null 表示不显示，缺省显示版本号 */
   badge?: string | null;
   onClick: (event: MouseEvent) => void;
@@ -49,10 +45,9 @@ function buildIcon(doc: Document): SVGSVGElement {
  * 用内联样式，避免 YouTube 全局 CSS 干扰。
  */
 export async function ensureEntryButton(options: EntryButtonOptions): Promise<HTMLElement | null> {
-  const { doc, label = 'Transcript', onClick, id = ENTRY_BUTTON_ID, variant = 'primary' } = options;
+  const { doc, label = 'Transcript', onClick, id = ENTRY_BUTTON_ID } = options;
   const version = typeof __YTT_VERSION__ === 'string' ? __YTT_VERSION__ : 'dev';
   const title = options.title ?? `打开字幕面板 · v${version}`;
-  const primary = variant === 'primary';
   const badgeText = options.badge === undefined ? `v${version}` : options.badge;
   const selectors = getSelectors();
 
@@ -77,18 +72,16 @@ export async function ensureEntryButton(options: EntryButtonOptions): Promise<HT
     'margin-left:10px',
     'height:34px',
     'padding:0 12px',
-    primary ? 'border:1px solid rgba(255,255,255,0.14)' : 'border:1px solid currentColor',
+    'border:1px solid rgba(255,255,255,0.14)',
     'border-radius:999px',
-    primary ? 'background:linear-gradient(135deg,#ff4e45,#ff7a45)' : 'background:transparent',
-    // ghost 跟随 masthead 的文字色：浅色主题下是深字，深色主题下是浅字
-    primary ? 'color:#fff' : 'color:inherit',
-    primary ? '' : 'opacity:.85',
-    'font-family:Inter,"PingFang SC",system-ui,sans-serif',
-    'font-size:13px',
-    'font-weight:600',
-    'letter-spacing:.2px',
+    'background:linear-gradient(135deg,#ff4e45,#ff7a45)',
+    'color:#fff',
+    // 与 YouTube 自身的按钮排版一致，别让入口按钮一眼看出是外挂
+    'font-family:Roboto,Arial,sans-serif',
+    'font-size:14px',
+    'font-weight:500',
     'cursor:pointer',
-    primary ? 'box-shadow:0 2px 10px rgba(255,78,69,.28)' : 'box-shadow:none',
+    'box-shadow:0 2px 10px rgba(255,78,69,.28)',
     'transition:transform .16s ease,box-shadow .16s ease,filter .16s ease',
     'align-self:center',
   ].join(';');
@@ -111,12 +104,12 @@ export async function ensureEntryButton(options: EntryButtonOptions): Promise<HT
 
   button.addEventListener('mouseenter', () => {
     button.style.transform = 'translateY(-1px)';
-    button.style.boxShadow = primary ? '0 6px 18px rgba(255,78,69,.4)' : '0 4px 12px rgba(0,0,0,.35)';
+    button.style.boxShadow = '0 6px 18px rgba(255,78,69,.4)';
     button.style.filter = 'brightness(1.05)';
   });
   button.addEventListener('mouseleave', () => {
     button.style.transform = 'translateY(0)';
-    button.style.boxShadow = primary ? '0 2px 10px rgba(255,78,69,.28)' : 'none';
+    button.style.boxShadow = '0 2px 10px rgba(255,78,69,.28)';
     button.style.filter = 'none';
   });
   button.addEventListener('click', (event) => {
@@ -129,7 +122,27 @@ export async function ensureEntryButton(options: EntryButtonOptions): Promise<HT
   return button;
 }
 
+/**
+ * 临时把入口按钮文案换成提示，2 秒后复原。
+ * 用于「当前页面没有右栏」这类说明：不能弹 alert，也不能再弹一个浮层。
+ */
+export function flashEntryButton(doc: Document, message: string, ms = 2000): void {
+  const button = doc.getElementById(ENTRY_BUTTON_ID);
+  const label = button?.querySelector<HTMLElement>('[data-role="label"]');
+  if (!button || !label) return;
+
+  const originalLabel = label.textContent ?? '';
+  const originalTitle = button.title;
+  label.textContent = message;
+  button.title = message;
+
+  setTimeout(() => {
+    label.textContent = originalLabel;
+    button.title = originalTitle;
+  }, ms);
+}
+
 export function removeEntryButton(doc: Document): void {
-  // 只删我们自己的按钮：copy-transcript-btn 由逐字节内联的 1.x 原版脚本自己管理
+  // 页面上只有这一个入口按钮
   doc.getElementById(ENTRY_BUTTON_ID)?.remove();
 }

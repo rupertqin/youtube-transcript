@@ -11,29 +11,38 @@
  * 刻意不用 `dark:` 变体 —— 两个挂载点（Side Panel 文档 / Shadow DOM 浮层）
  * 的主题载体不同，用变量 + 根节点 class 最稳。
  * ------------------------------------------------------------------ */
+/* 色彩与字体对齐 YouTube 自己的规范（dark 主题）：
+ *   背景 #0f0f0f / 抬升 #212121、正文 #f1f1f1、次要 #aaa、品牌红 #f00。
+ * 这样面板贴在 YouTube 页面旁边时不会显得是「外来软件」。 */
 .ytt-root {
-  --ytt-bg: #0f0f10;
-  --ytt-bg-elev: #17181a;
-  --ytt-surface: #1f2023;
-  --ytt-surface-2: #26282c;
-  --ytt-border: rgba(255, 255, 255, 0.08);
-  --ytt-border-strong: rgba(255, 255, 255, 0.16);
-  --ytt-text: #f2f3f5;
-  --ytt-text-dim: #a8adb6;
-  --ytt-text-mute: #6b7280;
-  --ytt-hover: rgba(255, 255, 255, 0.06);
-  --ytt-accent: #ff4e45;
-  --ytt-accent-2: #ff7a45;
-  --ytt-accent-soft: rgba(255, 78, 69, 0.14);
-  --ytt-highlight: rgba(255, 122, 69, 0.26);
+  --ytt-bg: #0f0f0f;
+  --ytt-bg-elev: #212121;
+  --ytt-surface: #272727;
+  --ytt-surface-2: #303030;
+  --ytt-border: rgba(255, 255, 255, 0.1);
+  --ytt-border-strong: rgba(255, 255, 255, 0.2);
+  /* 卡片外框比内部分隔线更实一点：贴在右栏里要能一眼看出边界 */
+  --ytt-card-border: rgba(255, 255, 255, 0.28);
+  --ytt-text: #f1f1f1;
+  --ytt-text-dim: #aaaaaa;
+  --ytt-text-mute: #717171;
+  --ytt-hover: rgba(255, 255, 255, 0.08);
+  /* 时间戳底色：比 --ytt-surface 再淡一档，做成小胶囊而不是色块 */
+  --ytt-time-bg: rgba(255, 255, 255, 0.09);
+  --ytt-accent: #ff0000;
+  --ytt-accent-2: #ff0000;
+  --ytt-accent-soft: rgba(255, 0, 0, 0.12);
+  --ytt-highlight: rgba(255, 0, 0, 0.2);
   --ytt-shadow: 0 18px 50px -12px rgba(0, 0, 0, 0.7);
-  --ytt-ok: #22c55e;
-  --ytt-warn: #f59e0b;
-  --ytt-err: #ef4444;
+  --ytt-ok: #3ea6ff;
+  --ytt-warn: #fbc02d;
+  --ytt-err: #ff4e45;
 
-  font-family: Inter, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
-  font-size: 13px;
-  line-height: 1.5;
+  /* 与 YouTube 完全一致：Roboto, Arial, sans-serif；正文 14px / 20px。
+     不再显式写中文字体 —— YouTube 自己也是让 sans-serif 回落到系统默认。 */
+  font-family: Roboto, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 20px;
   color: var(--ytt-text);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -41,17 +50,19 @@
 
 .ytt-root.ytt-light {
   --ytt-bg: #ffffff;
-  --ytt-bg-elev: #f6f7f9;
-  --ytt-surface: #ffffff;
-  --ytt-surface-2: #f1f2f4;
-  --ytt-border: rgba(15, 15, 16, 0.1);
-  --ytt-border-strong: rgba(15, 15, 16, 0.2);
-  --ytt-text: #111214;
-  --ytt-text-dim: #4b5563;
-  --ytt-text-mute: #6b7280;
-  --ytt-hover: rgba(15, 15, 16, 0.05);
-  --ytt-accent-soft: rgba(255, 78, 69, 0.1);
-  --ytt-highlight: rgba(255, 122, 69, 0.22);
+  --ytt-bg-elev: #f9f9f9;
+  --ytt-surface: #f2f2f2;
+  --ytt-surface-2: #e9e9e9;
+  --ytt-border: rgba(0, 0, 0, 0.1);
+  --ytt-border-strong: rgba(0, 0, 0, 0.2);
+  --ytt-card-border: rgba(0, 0, 0, 0.28);
+  --ytt-text: #0f0f0f;
+  --ytt-text-dim: #606060;
+  --ytt-text-mute: #909090;
+  --ytt-hover: rgba(0, 0, 0, 0.05);
+  --ytt-time-bg: rgba(0, 0, 0, 0.07);
+  --ytt-accent-soft: rgba(255, 0, 0, 0.08);
+  --ytt-highlight: rgba(255, 0, 0, 0.15);
   --ytt-shadow: 0 18px 50px -18px rgba(15, 15, 16, 0.3);
 }
 
@@ -103,6 +114,29 @@
 }
 .ytt-root .ytt-scroll::-webkit-scrollbar-thumb:hover {
   background: var(--ytt-text-mute);
+}
+
+/* ------------------------------------------------------------------ *
+ * 右栏内嵌卡片（variant=sidebar）
+ *
+ * 高度必须显式：virtual-list 用 scroller.clientHeight 做窗口化，
+ * 高度为 0 时会回落到 600px 估算，行高与滚动位置全会错。
+ * 高度走 CSS 变量，由 sidebar.ts 在挂载时注入，折叠态复用同一个变量。
+ * ------------------------------------------------------------------ */
+.ytt-root.ytt-card {
+  width: 100%;
+  height: var(--ytt-card-height, min(660px, 78vh));
+  overflow: hidden;
+  border: 1px solid var(--ytt-card-border);
+  border-radius: 12px;
+  background: var(--ytt-bg);
+  transition: height 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ytt-root.ytt-card {
+    transition: none;
+  }
 }
 
 @keyframes ytt-shimmer {

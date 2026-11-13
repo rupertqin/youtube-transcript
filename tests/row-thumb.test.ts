@@ -44,11 +44,21 @@ function makeEl(tagName = 'div'): FakeEl {
       el.children.push(child as FakeEl);
     },
     addEventListener: () => undefined,
-    // 只支持本测试用到的 [data-role="x"] 形式
+    // 只支持本测试用到的 [data-role="x"] 形式。
+    // 必须**递归**：时间戳现在内联在正文里，是 text 的子节点，不是 row 的直接子节点。
     querySelector: (selector: string) => {
       const match = /\[data-role="([^"]+)"\]/u.exec(selector);
       if (!match) return null;
-      return el.children.find((child) => child.dataset?.role === match[1]) ?? null;
+      const want = match[1];
+      const walk = (node: FakeEl): FakeEl | null => {
+        for (const child of node.children ?? []) {
+          if (child.dataset?.role === want) return child;
+          const hit = walk(child);
+          if (hit) return hit;
+        }
+        return null;
+      };
+      return walk(el);
     },
     querySelectorAll: () => {
       throw new Error('not supported');
@@ -129,9 +139,11 @@ describe('章节行缩略图', () => {
     const time = row.querySelector('[data-role="time"]')!;
     const bar = row.querySelector('[data-role="bar"]')!;
 
-    // 三处都要变，不能因为多了缩略图就错位
+    // 三处都要变，不能因为多了缩略图就错位。
+    // 时间戳保持灰色（原版如此），高亮靠正文变亮 + 左侧竖条。
     expect(text.className).toContain('text-[var(--ytt-text)]');
-    expect(time.className).toContain('text-[var(--ytt-accent)]');
+    expect(time.className).toContain('text-[var(--ytt-text-dim)]');
+    expect(time.className).toContain('block');
     expect(bar.className).toContain('bg-[var(--ytt-accent)]');
   });
 });

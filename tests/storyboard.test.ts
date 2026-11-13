@@ -12,10 +12,10 @@ const SPEC =
 
 describe('storyboard 取帧', () => {
   it('按时间点算出正确的图集与偏移', () => {
-    // 第 0 帧：第一张图集，左上角
+    // 第 0 帧：第一张图集，左上角。URL 必须带上该档的 sigh，否则图是 404
     const first = frameAt(SPEC, 0);
     expect(first).not.toBeNull();
-    expect(first!.url).toBe('https://i.ytimg.com/sb/abc/storyboard3_L1/M0.jpg?sqp=x');
+    expect(first!.url).toBe('https://i.ytimg.com/sb/abc/storyboard3_L1/M0.jpg?sqp=x&sigh=sig');
     expect(first!.offsetX).toBe(0);
     expect(first!.offsetY).toBe(0);
 

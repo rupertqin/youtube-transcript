@@ -1,3 +1,4 @@
+import { readPlayerVideoId } from './player';
 import { videoIdFromGetTranscriptBody } from './parse/transcript';
 import {
   isGetTranscriptUrl,
@@ -45,7 +46,21 @@ interface Waiter {
   timer: ReturnType<typeof setTimeout>;
 }
 
-/** get_transcript 的 POST body 里没有 videoId（它在 protobuf params 里），只能从当前页 URL 取。 */
+/**
+ * 归属兜底：先信播放器，再退地址栏。
+ *
+ * SPA 切页时地址栏先变、播放器后变，而原生字幕面板属于**播放器**。
+ * 只用地址栏的话，旧面板迟到的请求会被标成新视频，于是新视频一打开
+ * 就显示上一个视频的字幕 —— 而且 videoId 完全对得上。
+ */
+function ownerVideoId(win: Window): string | null {
+  try {
+    return readPlayerVideoId(win) ?? videoIdFromLocation(win);
+  } catch {
+    return videoIdFromLocation(win);
+  }
+}
+
 export function videoIdFromLocation(win: Window): string | null {
   try {
     const href = win.location?.href ?? '';
@@ -81,14 +96,23 @@ export function installTimedTextHook(win: Window): TimedTextHook {
 
   const notify = (capture: TimedTextCapture) => {
     for (const waiter of [...waiters]) {
-      if (waiter.videoId && capture.videoId && waiter.videoId !== capture.videoId) continue;
+      // 归属未知的 capture 不能作为任何视频的命中：宁可超时走下一层，
+      // 也不能把别的视频的字幕当成当前视频返回。
+      if (!capture.videoId || capture.videoId !== waiter.videoId) continue;
       clearTimeout(waiter.timer);
       waiters.delete(waiter);
       waiter.resolve(capture);
     }
   };
 
-  const record = (url: string, text: string, kind: CaptureKind, bodyHint?: unknown) => {
+  const record = (
+    url: string,
+    text: string,
+    kind: CaptureKind,
+    bodyHint?: unknown,
+    /** 请求**发出那一刻**的地址栏视频 id，由调用方在发起请求时同步取好 */
+    atRequestVideoId?: string | null,
+  ) => {
     if (!text || !text.trim()) return;
     const fingerprint = `${url}#${text.length}#${text.slice(0, 24)}`;
     if (seen.has(fingerprint)) return;
@@ -97,11 +121,13 @@ export function installTimedTextHook(win: Window): TimedTextHook {
     const capture: TimedTextCapture = {
       url,
       kind,
-      // get_transcript 的 videoId 在 POST body 里，URL 上认不出来
+      // get_transcript 的 videoId 在 POST body 里（protobuf params），URL 上认不出来。
+      // 关键：地址栏兜底必须用**请求发出时**的 id，不能用响应到达时的 ——
+      // 切页时请求属于旧视频、响应却在新地址栏下到达，用后者会把归属整体搞错。
       videoId:
         kind === 'get_transcript'
           ? (videoIdFromGetTranscriptBody(bodyHint) ??
-            videoIdFromLocation(win) ??
+            atRequestVideoId ??
             videoIdFromTimedTextUrl(url))
           : videoIdFromTimedTextUrl(url),
       lang: langFromTimedTextUrl(url),
@@ -165,12 +191,14 @@ export function installTimedTextHook(win: Window): TimedTextHook {
       const kind = captureKind(url);
       if (kind) {
         const bodyHint = (args[1] as RequestInit | undefined)?.body;
+        // 同步取：请求属于哪个视频由「发出这一刻」的播放器决定（播放器才拥有这个面板）
+        const atRequest = ownerVideoId(win);
         promise
           .then((response) => {
             const clone = response.clone();
             clone
               .text()
-              .then((text) => record(url, text, kind, bodyHint))
+              .then((text) => record(url, text, kind, bodyHint, atRequest))
               .catch(() => undefined);
           })
           .catch(() => undefined);
@@ -207,10 +235,12 @@ export function installTimedTextHook(win: Window): TimedTextHook {
       const kind = captureKind(url);
       if (kind) {
         const bodyHint = args[0];
+        // 同 fetch：归属以「发出请求时」的播放器为准
+        const atRequest = ownerVideoId(win);
         this.addEventListener('load', () => {
           try {
             const text = this.responseType === 'json' ? JSON.stringify(this.response) : this.responseText;
-            if (typeof text === 'string') record(url, text, kind, bodyHint);
+            if (typeof text === 'string') record(url, text, kind, bodyHint, atRequest);
           } catch {
             /* responseType 为 arraybuffer 时读不到文本，忽略 */
           }

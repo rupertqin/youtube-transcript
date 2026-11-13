@@ -1,17 +1,23 @@
-import '../src/legacy/verbatim-runtime.js';
-import { ensureEntryButton, removeEntryButton } from '../src/core/dom/button';
-import { extractTranscriptLegacy } from '../src/core/dom/legacy';
+import { ensureEntryButton, flashEntryButton, removeEntryButton } from '../src/core/dom/button';
+import { readDomPreview } from '../src/core/dom/native-panel';
+import { closeTranscriptPanelVerified } from '../src/core/dom/panel';
 import { sleep } from '../src/core/dom/wait';
 import { harvestTranscript } from '../src/core/harvest/chain';
-import { readTitle, readVideoId } from '../src/core/harvest/player';
-import { defaultLangs } from '../src/core/langs';
+import {
+  hasNativeTrackFor,
+  readAvailableLangs,
+  readTitleFor,
+  readVideoId,
+} from '../src/core/harvest/player';
+import { pickUsableChoice, resolveLangPlan } from '../src/core/langs';
 import { log } from '../src/core/log';
 import type { SourceOutcome } from '../src/core/types';
 import { createBridgeEndpoint } from '../src/platform/bridge';
 import { createLocalClient } from '../src/platform/local-client';
 import { isPanelRequest, RUNTIME_TAG } from '../src/platform/protocol';
 import { createSession } from '../src/platform/session';
-import { createOverlay } from '../src/ui/overlay';
+import { getPrefs } from '../src/ui/prefs';
+import { createSidebarPanel } from '../src/ui/sidebar';
 import panelCss from '../src/ui/styles.css?inline';
 
 interface RemotePayload {
@@ -20,13 +26,19 @@ interface RemotePayload {
   track?: SourceOutcome['track'];
   showTimestamps: boolean;
   failures?: SourceOutcome['failures'];
+  complete?: boolean;
 }
 
 export default defineContentScript({
   matches: ['https://www.youtube.com/*'],
   runAt: 'document_start',
   async main(ctx) {
-    const LANGS = defaultLangs();
+    // 每次抓取现读偏好：切语言后下一次 load 立即生效。
+    // 视频给不了所选语言时按「同音频」处理 —— 和按钮的禁用状态保持一致。
+    const langPlan = () => {
+      const available = readAvailableLangs(window, readVideoId(window) ?? undefined);
+      return resolveLangPlan(pickUsableChoice(getPrefs().lang, available));
+    };
     const bridge = createBridgeEndpoint(window);
 
     let bridgeReady: Promise<boolean> | null = null;
@@ -54,13 +66,16 @@ export default defineContentScript({
         track: payload.track,
         showTimestamps: payload.showTimestamps,
         failures: payload.failures ?? [],
+        complete: payload.complete !== false,
       };
     };
 
     const session = createSession({
       win: window,
       hooks: {
-        title: () => readTitle(window),
+        // 标题按 videoId 取，避免「新字幕配旧标题」
+        title: (videoId) => readTitleFor(window, videoId),
+        langPlan,
         // playerResponse 只在 MAIN world，章节截图规格必须过桥
         storyboard: async () => {
           if (!(await ensureBridge())) return null;
@@ -70,18 +85,22 @@ export default defineContentScript({
             return null;
           }
         },
-        harvest: async (videoId, signal, onStage) => {
+        harvest: async (videoId, signal, onStage, options) => {
           // bridge 没起来（旧标签页、注入失败）时直接退化到 DOM 抓取，别白等超时
           const bridgeUp = await ensureBridge();
+          const plan = langPlan();
+          // 没有目标语言的原生轨道时，拦截层 / DOM 层只能给原文 —— 让远程先上
+          const needsTranslation = Boolean(plan.tlang) && !hasNativeTrackFor(window, plan.tlang!);
           return harvestTranscript({
             signal,
             log,
             onStage,
+            preferRemote: needsTranslation,
             remote: bridgeUp
               ? async () => {
                   const payload = await bridge.request<RemotePayload | null>(
                     'HARVEST_REMOTE',
-                    { videoId, langs: LANGS },
+                    { videoId, langs: langPlan().langs, tlang: langPlan().tlang },
                     25000,
                   );
                   return toOutcome(payload);
@@ -91,7 +110,7 @@ export default defineContentScript({
               ? async () => {
                   const payload = await bridge.request<RemotePayload | null>(
                     'WAIT_TIMEDTEXT',
-                    { videoId, timeoutMs: 0 },
+                    { videoId, timeoutMs: 0, tlang: langPlan().tlang },
                     3000,
                   );
                   return toOutcome(payload);
@@ -101,21 +120,41 @@ export default defineContentScript({
               ? async (timeoutMs) => {
                   const payload = await bridge.request<RemotePayload | null>(
                     'WAIT_TIMEDTEXT',
-                    { videoId, timeoutMs },
+                    { videoId, timeoutMs, tlang: langPlan().tlang },
                     timeoutMs + 3000,
                   );
                   return toOutcome(payload);
                 }
               : undefined,
-            dom: async () => {
-              const result = await extractTranscriptLegacy(document);
+            // 主路径：MAIN world 里直接问 get_transcript，一次拿回全部分段
+            structured: bridgeUp
+              ? async () => {
+                  if (plan.tlang) return null; // 要翻译时不能拿原文顶替
+                  const payload = await bridge.request<RemotePayload | null>(
+                    'GET_TRANSCRIPT',
+                    { videoId, langs: plan.langs },
+                    8000,
+                  );
+                  return toOutcome(payload);
+                }
+              : undefined,
+            // 同步预览：一次可见文本扫描，不点击、不等待、不滚动
+            domPreview: () => {
+              const result = readDomPreview(document, {
+                videoId,
+                skipSnapshot: options?.staleRisk,
+                avoidSignature: options?.avoid ?? null,
+              });
               if (result.lines.length === 0) return null;
               return {
                 lines: result.lines,
                 source: 'dom',
                 showTimestamps: result.showTimestamps,
+                complete: false,
               };
             },
+            onPreview: options?.onPreview,
+            closePanel: () => closeTranscriptPanelVerified(document),
           });
         },
       },
@@ -129,7 +168,8 @@ export default defineContentScript({
 
     // content script 只能是 IIFE（Chrome 不支持 ESM content script），所以
     // 动态 import 会被内联，无法靠代码分割减到 content.js 的体积 —— 见 README「体积」一节。
-    const overlay = createOverlay({ doc: document, css: panelCss, client });
+    // 页面内面板改为嵌入右栏；扩展自己的 Side Panel 不受影响。
+    const sidebar = createSidebarPanel({ doc: document, css: panelCss, client });
 
     /* ---- 与 Side Panel 通信 ---- */
     let lastBroadcast = 0;
@@ -165,17 +205,6 @@ export default defineContentScript({
     });
 
     /* ---- 页面入口 ---- */
-    const openSidePanel = async (): Promise<boolean> => {
-      try {
-        const result = (await chrome.runtime.sendMessage({ tag: RUNTIME_TAG, type: 'OPEN_PANEL' })) as
-          | { ok?: boolean }
-          | undefined;
-        return Boolean(result?.ok);
-      } catch {
-        return false;
-      }
-    };
-
     const refreshButton = async (): Promise<void> => {
       if (!readVideoId(window)) {
         removeEntryButton(document);
@@ -184,10 +213,13 @@ export default defineContentScript({
       await ensureEntryButton({
         doc: document,
         label: 'Transcript',
-        title: '打开字幕面板',
-        onClick: async () => {
-          const opened = await openSidePanel();
-          if (!opened) overlay.toggle();
+        title: '在右栏打开字幕',
+        onClick: () => {
+          if (sidebar.isOpen()) {
+            sidebar.hide();
+            return;
+          }
+          if (!sidebar.show()) flashEntryButton(document, '当前页面没有右栏');
         },
       });
     };
@@ -201,15 +233,32 @@ export default defineContentScript({
       void session.load(true);
     });
 
+    // 先把右栏面板挂上（document_start 时右栏可能还没渲染，内部会自动重试）
+    try {
+      sidebar.ensureMounted();
+    } catch (error) {
+      log({ code: 'UNKNOWN', source: 'host', detail: `sidebar mount failed: ${String(error)}` });
+    }
     session.sync();
     void refreshButton();
+    // 定时对账：不依赖 locationchange，漏事件也能在 500ms 内跟上切页
+    session.start();
 
     ctx.addEventListener(window, 'wxt:locationchange', () => {
-      overlay.hide();
+      // 每一步独立隔离：挂载失败不能吃掉同步
+      try {
+        // 切页保持面板展开；右栏被重建时 ensureMounted 会挂回去
+        sidebar.ensureMounted();
+      } catch (error) {
+        log({ code: 'UNKNOWN', source: 'host', detail: `sidebar remount failed: ${String(error)}` });
+      }
       session.sync();
       void refreshButton();
     });
 
-    ctx.onInvalidated(() => overlay.destroy());
+    ctx.onInvalidated(() => {
+      session.dispose();
+      sidebar.destroy();
+    });
   },
 });

@@ -5,8 +5,8 @@ export const BRIDGE_CHANNEL = 'ytt-bridge-v1';
 /** MAIN world bridge 支持的方法 */
 export type BridgeRequest =
   | { type: 'PING' }
-  | { type: 'HARVEST_REMOTE'; videoId: string; langs: string[] }
-  | { type: 'WAIT_TIMEDTEXT'; videoId: string; timeoutMs: number }
+  | { type: 'HARVEST_REMOTE'; videoId: string; langs: string[]; tlang?: string | null }
+  | { type: 'WAIT_TIMEDTEXT'; videoId: string; timeoutMs: number; tlang?: string | null }
   | { type: 'GET_TRANSCRIPT'; videoId: string; langs: string[] }
   /** storyboard 规格只在 MAIN world 读得到（playerResponse 在页面上下文） */
   | { type: 'STORYBOARD' };

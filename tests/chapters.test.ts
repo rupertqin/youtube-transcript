@@ -1,26 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { snapshotTranscriptText } from '../src/core/dom/legacy';
+import { describe, expect, it } from 'vitest';
+import { snapshotTranscriptText } from '../src/core/dom/native-panel';
 import { looksLikeTranscript } from '../src/core/lines';
-import type { LegacyV19 } from '../src/legacy/contract';
 import type { TranscriptLine } from '../src/core/types';
-
-/** 原版 extractFallback 的等价切分，作为 __yttLegacyV19 的测试替身。 */
-function originalFallback(panel: Element): { text: string } {
-  const raw = ((panel as HTMLElement | null)?.innerText || '')
-    .split('\n')
-    .map((row) => row.replace(/\s+/gu, ' ').trim())
-    .filter(Boolean)
-    .join('\n');
-  if (!raw) return { text: '' };
-  const parts = raw.split(/\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*/u);
-  const out: string[] = [];
-  for (let i = 1; i < parts.length; i += 2) {
-    const time = parts[i];
-    const body = (parts[i + 1] ?? '').replace(/\s+/gu, ' ').trim();
-    if (time && body) out.push(`${time} ${body}`);
-  }
-  return { text: out.length ? out.join('\n') : raw };
-}
 
 function docWithVisibleText(innerText: string): Document {
   return {
@@ -31,12 +12,6 @@ function docWithVisibleText(innerText: string): Document {
 }
 
 const line = (start: number, text: string): TranscriptLine => ({ start, dur: 0, text });
-
-beforeEach(() => {
-  vi.stubGlobal('__yttLegacyV19', {
-    extractFallback: originalFallback,
-  } as unknown as LegacyV19);
-});
 
 describe('Chapters 时间点不是字幕', () => {
   it('截图里那种 22 行章节（带 JSON 残留 `] — …\\n[`）不产出结果', () => {

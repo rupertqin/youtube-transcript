@@ -2,13 +2,48 @@ import type { TranscriptLine } from '../../types';
 
 const VIDEO_ID_RE = /"?videoId"?\s*[:=]\s*"?([\w-]{11})/u;
 
+/** base64 → binary string。浏览器用 atob，node（单测）用 Buffer，都没有就放弃。 */
+function decodeBase64(input: string): string | null {
+  const normalized = input.replace(/-/gu, '+').replace(/_/gu, '/');
+  try {
+    if (typeof atob === 'function') return atob(normalized);
+    const buffer = (globalThis as { Buffer?: { from: (s: string, enc: string) => { toString: (enc: string) => string } } })
+      .Buffer;
+    if (buffer) return buffer.from(normalized, 'base64').toString('binary');
+  } catch {
+    /* 非法 base64，交给上层 */
+  }
+  return null;
+}
+
+/**
+ * get_transcript 的 `params` 是 base64(protobuf)，videoId 在第 1 个字段：
+ * 字节序列 `0x0a 0x0b <11 字节 id>`。这是**请求里唯一可信的归属信息**。
+ */
+const PARAM_VIDEO_ID_RE = /\u000a\u000b([A-Za-z0-9_-]{11})/u;
+
 /**
  * 从 get_transcript 的**请求体**里取 videoId。
- * 这个接口的 videoId 在 POST body 里，URL 上只有 prettyPrint，靠 URL 认不出来。
+ *
+ * 这个接口的 URL 上只有 prettyPrint，真实视频 id 藏在 POST body 里：
+ *  - 新版 body 里可能直接有 `videoId` 字段；
+ *  - 更常见的是只有 `params`，必须 base64 解码后从 protobuf 里读。
+ *
+ * 为什么非要读到它：读不到就只能退回「发请求那一刻的地址栏」，而 SPA 切页时
+ * 地址栏先变、面板后变，旧面板迟到的请求会被错标成新视频 —— 于是新视频
+ * 显示的正是上一个视频的字幕，而且 id 完全对得上，怎么查都查不出来。
  */
 export function videoIdFromGetTranscriptBody(body: unknown): string | null {
   if (typeof body !== 'string') return null;
-  const match = VIDEO_ID_RE.exec(body);
+
+  const direct = VIDEO_ID_RE.exec(body);
+  if (direct) return direct[1];
+
+  const params = /"params"\s*:\s*"([^"]+)"/u.exec(body);
+  if (!params) return null;
+
+  const decoded = decodeBase64(params[1]);
+  const match = decoded ? PARAM_VIDEO_ID_RE.exec(decoded) : null;
   return match ? match[1] : null;
 }
 

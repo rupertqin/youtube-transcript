@@ -4,17 +4,31 @@ import type { TranscriptLine } from '../core/types';
 import { h } from './dom';
 import { renderHighlighted } from './search';
 
+/**
+ * 一行字幕。
+ *
+ * 学原版的留白：左右 20px、上下 10/12px，块与块之间因此有约 22px 的空隙；
+ * 时间戳**单独占一行**（原版就是时间在上、正文在下的两行结构），
+ * 正文行高 24px。之前时间戳内联在正文首行、行距也小，读起来像表格。
+ */
 const ROW_BASE =
-  'group absolute left-0 top-0 flex w-full items-start gap-2.5 px-3 py-2 text-left transition-colors duration-150';
+  'group absolute left-1 right-1 top-0 flex items-start gap-3 rounded-lg px-5 pb-3 pt-2.5 text-left transition-colors duration-150';
 const ROW_ACTIVE = 'bg-[var(--ytt-accent-soft)]';
 const ROW_IDLE = 'hover:bg-[var(--ytt-hover)]';
-const BAR_BASE = 'absolute bottom-1.5 left-1 top-1.5 w-[3px] rounded-full transition-colors';
+const BAR_BASE = 'absolute bottom-3 left-0 top-3 w-[3px] rounded-full transition-colors';
 const BAR_ON = 'bg-[var(--ytt-accent)]';
 const BAR_OFF = 'bg-transparent';
-const TIME_BASE = 'mt-[2px] w-[38px] shrink-0 text-right text-[11px] tabular-nums transition-colors';
-const TIME_ON = 'text-[var(--ytt-accent)]';
+/**
+ * 时间戳在原版里是**正文上方独立的一行**（不是左侧列，也不是首行内联）：
+ * 12px 灰色、行高 16px、与正文之间留 6px。这样正文可以占满整个宽度，
+ * 长句不会被时间戳挤成窄栏。
+ */
+const TIME_BASE =
+  'mb-1.5 block w-fit rounded-[4px] bg-[var(--ytt-time-bg)] px-1.5 py-[1px] text-[12px] leading-[16px] tabular-nums transition-colors';
+const TIME_ON = 'text-[var(--ytt-text-dim)]';
 const TIME_OFF = 'text-[var(--ytt-text-mute)] group-hover:text-[var(--ytt-text-dim)]';
-const TEXT_BASE = 'min-w-0 flex-1 text-[12.5px] leading-[1.6]';
+/** 正文 14px / 20px：与 YouTube 正文的行高完全一致 */
+const TEXT_BASE = 'min-w-0 flex-1 text-[14px] leading-[20px]';
 const TEXT_ON = 'font-medium text-[var(--ytt-text)]';
 const TEXT_OFF = 'text-[var(--ytt-text-dim)] group-hover:text-[var(--ytt-text)]';
 
@@ -50,7 +64,7 @@ export function createRow(options: RowOptions): HTMLElement {
     // 雪碧图裁切：整张图集按显示宽度缩放，再平移把目标帧露出来
     row.appendChild(
       h('span', {
-        class: 'mt-[1px] shrink-0 overflow-hidden rounded-[3px] bg-[var(--ytt-hover)]',
+        class: 'mt-[3px] shrink-0 overflow-hidden rounded bg-[var(--ytt-hover)]',
         style: {
           width: `${thumb.width}px`,
           height: `${thumb.height}px`,
@@ -64,17 +78,19 @@ export function createRow(options: RowOptions): HTMLElement {
     );
   }
 
+  const text = h('span', { class: `${TEXT_BASE} ${active ? TEXT_ON : TEXT_OFF}` });
+  text.dataset.role = 'text';
+
+  // 时间戳放进正文里（同一段文字流），换行时与文字一起折行
   if (showTimestamps) {
     const time = h('span', {
       class: `${TIME_BASE} ${active ? TIME_ON : TIME_OFF}`,
       text: formatTimestamp(line.start),
     });
     time.dataset.role = 'time';
-    row.appendChild(time);
+    text.appendChild(time);
   }
 
-  const text = h('span', { class: `${TEXT_BASE} ${active ? TEXT_ON : TEXT_OFF}` });
-  text.dataset.role = 'text';
   text.append(renderHighlighted(line.text, needle));
   row.appendChild(text);
 

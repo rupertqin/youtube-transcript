@@ -62,11 +62,24 @@ export interface SourceOutcome {
   track?: CaptionTrack;
   showTimestamps: boolean;
   failures?: FailureRecord[];
+  /**
+   * 是否是「从开头到结尾的完整字幕」。
+   *
+   * false = 只从页面上已渲染的视口里读到的片段（DOM 预览），
+   * 可以临时显示但**不能当最终结果、不能写缓存**。
+   * 省略按 true 处理：结构化接口、拦截、远程都是全量结果。
+   */
+  complete?: boolean;
 }
 
 export interface HarvestContext {
   videoId: string;
   langs: string[];
+  /**
+   * 需要机器翻译成的语言（timedtext 的 tlang 参数）。null/省略 = 用原声轨道。
+   * 只在「视频没有该语言的原生字幕」时才会真正拼进 URL。
+   */
+  tlang?: string | null;
   signal: AbortSignal;
   log: Logger;
 }
@@ -87,7 +100,14 @@ export interface PanelState {
   showTimestamps: boolean;
   source: SourceName | null;
   lang: string | null;
+  /**
+   * 这条视频「能拿到哪些语言」的字幕：原生轨道 + YouTube 支持的机器翻译目标。
+   * 语言切换按钮只显示这里列出的语言 —— 没有的字幕就不要给一个点了没反应的按钮。
+   */
+  availableLangs: string[];
   cached: boolean;
+  /** false = 当前显示的是临时预览，完整结果还在路上 */
+  complete: boolean;
   failures: FailureRecord[];
   error: { code: ErrorCode; detail?: string } | null;
   /** 当前高亮行（字幕视图用），-1 表示无 */

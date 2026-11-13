@@ -69,8 +69,7 @@ function triggerCandidates(doc: Document): HTMLElement[] {
     .filter(
       (el) =>
         el.id !== 'ytt-entry-btn' &&
-        el.id !== 'copy-transcript-btn' &&
-        !el.closest('#ytt-entry-btn, #copy-transcript-btn, ytd-masthead') &&
+        !el.closest('#ytt-entry-btn, ytd-masthead') &&
         isVisible(el),
     );
 }
@@ -155,27 +154,36 @@ export async function openTranscriptPanel(
   }
 
   triggerInfo = '面板存在但为空壳';
-  const trigger = findTrigger(doc);
-  if (!trigger) {
-    // 简介折叠时按钮不可见：展开一次再找
-    if (await expandDescription(doc)) {
-      triggerInfo = '展开简介后';
-      const retry = findTrigger(doc);
-      if (retry) {
-        triggerInfo = `点击触发器: ${retry.textContent?.trim().slice(0, 30) ?? ''}`;
-        retry.click();
-        await sleep(400);
-      } else {
-        triggerInfo = `展开简介后仍未找到触发器；可点项: ${describeTriggers(doc)}`;
-      }
-    } else {
-      triggerInfo = `未找到 Show transcript 触发器；可点项: ${describeTriggers(doc)}`;
+
+  /**
+   * 点开面板。返回 false 表示**一个可点的东西都没找到** —— 这时没必要再等，
+   * 页面上不会凭空长出片段来（以前会白等满 8 秒）。
+   */
+  const clickOpen = async (): Promise<boolean> => {
+    const trigger = findTrigger(doc);
+    if (trigger) {
+      triggerInfo = `点击触发器: ${trigger.textContent?.trim().slice(0, 30) ?? ''}`;
+      trigger.click();
+      await sleep(400);
+      return true;
     }
-  } else {
-    triggerInfo = `点击触发器: ${trigger.textContent?.trim().slice(0, 30) ?? ''}`;
-    trigger.click();
+    // 简介折叠时按钮不可见：展开一次再找
+    if (!(await expandDescription(doc))) {
+      triggerInfo = `未找到 Show transcript 触发器；可点项: ${describeTriggers(doc)}`;
+      return false;
+    }
+    const retry = findTrigger(doc);
+    if (!retry) {
+      triggerInfo = `展开简介后仍未找到触发器；可点项: ${describeTriggers(doc)}`;
+      return false;
+    }
+    triggerInfo = `展开简介后点击触发器: ${retry.textContent?.trim().slice(0, 30) ?? ''}`;
+    retry.click();
     await sleep(400);
-  }
+    return true;
+  };
+
+  if (!(await clickOpen())) return panel ?? null;
 
   const deadline = Date.now() + timeoutMs;
   let tabClicked = false;
@@ -195,16 +203,108 @@ export async function openTranscriptPanel(
 }
 
 /**
- * 关闭原生面板（抓完 DOM 后还页面一个干净视图）。
- * 面板只是抓取用的临时载体，无论成功失败都要收掉，否则页面上会同时存在两套字幕 UI。
+ * 切页时把上一页残留的原生字幕面板收掉。
+ *
+ * YouTube 的 SPA 切页不会销毁展开着的字幕面板，面板里仍是**上一个视频**的行。
+ * 这些行没有任何 videoId 标记，DOM 层无法判断归属，只能强制让它重新渲染：
+ * 收起来之后，下一次 `openTranscriptPanel()` 会让 YouTube 按新视频重新拉取。
+ *
+ * 只在「确实像字幕面板」时才动手（有行首时间码 / 有片段元素），
+ * 避免把评论、简介这类其它 engagement panel 一起关掉。
  */
+export function discardStaleTranscriptPanel(doc: Document): boolean {
+  try {
+    const panel = pickPanel(doc);
+    if (panel && scorePanel(panel) > 0) {
+      closeTranscriptPanel(doc, panel);
+      return true;
+    }
+
+    // `pickPanel()` 认不出（2026 改版、面板停在上一个视频且结构不同）时，
+    // 退一步按 target-id 直接找。关不掉也不强求 —— 上层还有内容指纹兜底，
+    // 但这里多试一次能省掉一整轮「读到旧内容再丢弃」的等待。
+    const fallback = deepQueryAll(doc, '[target-id*="transcript"]').find((el) => isVisible(el));
+    if (!fallback) return false;
+    closeTranscriptPanel(doc, fallback);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function closeTranscriptPanel(doc: Document, panel: Element | null): void {
   const scope = panel ?? doc;
-  const closer =
+
+  // 2026 面板换过几版结构：#visibility-button 有时是容器、有时直接是按钮，
+  // 新版干脆只留一个 aria-label 含 Close 的图标按钮。三条都试一遍。
+  const explicit =
     scope.querySelector<HTMLElement>('#visibility-button button') ??
     scope.querySelector<HTMLElement>('ytd-engagement-panel-title-header-renderer #visibility-button button') ??
+    scope.querySelector<HTMLElement>('yt-icon-button#visibility-button button') ??
     doc.querySelector<HTMLElement>(
       'ytd-engagement-panel-section-list-renderer[target-id*="transcript"] #visibility-button button',
     );
-  closer?.click();
+  if (explicit) {
+    explicit.click();
+    return;
+  }
+
+  // #visibility-button 本身常常就是那个 <yt-icon-button>（里面没有 <button>）
+  const visibility = scope.querySelector<HTMLElement>('#visibility-button');
+  if (visibility) {
+    visibility.click();
+    return;
+  }
+
+  const labelled = deepQueryWithin(scope as Element, 'button, yt-icon-button, [role="button"]').find((el) => {
+    const label = `${el.getAttribute('aria-label') ?? ''} ${el.getAttribute('title') ?? ''}`;
+    return /close|收起|关闭/iu.test(label) && isVisible(el);
+  }) as HTMLElement | undefined;
+  labelled?.click();
+}
+
+/**
+ * 原生字幕面板现在是否展开。
+ *
+ * 关闭动作是异步生效的：点一下立刻检查 DOM 还是 EXPANDED，所以必须有
+ * 「点 → 等 → 再看」的验证循环，否则就是用户说的「显示了不会消失」。
+ */
+export function isTranscriptPanelExpanded(doc: Document): boolean {
+  try {
+    const panel = pickPanel(doc);
+    if (panel) {
+      const visibility = panel.getAttribute('visibility') ?? '';
+      if (visibility.includes('EXPANDED')) return true;
+      if (visibility.includes('COLLAPSED')) return false;
+    }
+    // 面板识别不到时退一步：页面上有没有可见的「关闭字幕」按钮
+    return deepQueryAll(doc, 'button, [role="button"]').some((el) => {
+      const label = `${el.getAttribute('aria-label') ?? ''} ${el.textContent ?? ''}`;
+      return (
+        /close\s*transcript/iu.test(label) &&
+        typeof el.getClientRects === 'function' &&
+        el.getClientRects().length > 0
+      );
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 验证式收起：最多三轮「点一下、等一下、再看」，确认真的收起了才返回。
+ *
+ * 只点 YouTube 自己的按钮，不隐藏/移除它的节点 —— 后者会让官方 UI 的
+ * 「已展开」状态与实际画面不一致，下一次点击反而打不开。
+ */
+export async function closeTranscriptPanelVerified(doc: Document): Promise<boolean> {
+  try {
+    for (let attempt = 0; attempt < 3 && isTranscriptPanelExpanded(doc); attempt += 1) {
+      closeTranscriptPanel(doc, pickPanel(doc));
+      await sleep(220);
+    }
+    return !isTranscriptPanelExpanded(doc);
+  } catch {
+    return false;
+  }
 }

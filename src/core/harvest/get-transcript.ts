@@ -3,7 +3,7 @@ import { parseGetTranscript } from './parse/transcript';
 /**
  * 直接构造 InnerTube `get_transcript` 请求。
  *
- * 这是「参考原版」的彻底版本：原生字幕面板显示的行，数据来源就是这个接口。
+ * 原生字幕面板显示的行，数据来源就是这个接口。
  * 之前我们等面板打开后拦截它发的请求，但面板打不开（入口元素、tab、懒加载）
  * 每一步都可能卡住 —— 现在自己构造 params 直接请求，绕开所有 DOM 问题。
  *
@@ -201,6 +201,9 @@ export interface GetTranscriptOptions {
   videoId: string;
   langs: string[];
   signal: AbortSignal;
+  /** 整体时限与尝试上限：主路径不能因为排列组合把用户卡住十几秒 */
+  timeoutMs?: number;
+  maxAttempts?: number;
 }
 
 /**
@@ -209,25 +212,36 @@ export interface GetTranscriptOptions {
  */
 export async function fetchGetTranscript(options: GetTranscriptOptions): Promise<GetTranscriptOutcome | null> {
   const { win, fetchFn, videoId, langs, signal } = options;
+  const deadline = Date.now() + (options.timeoutMs ?? 8_000);
+  const maxAttempts = options.maxAttempts ?? 12;
   const clients = clientContexts(win);
   const reasons: string[] = [];
+  let attempts = 0;
 
   // 页面自带的 params 排在最前：它是 YouTube 为这个视频生成的，编码一定正确
   const realParams = collectRealParams(win);
-  const generated: string[] = [];
+  const generated: { value: string; lang: string }[] = [];
   for (const lang of langs.length > 0 ? langs : ['en']) {
     const params = buildGetTranscriptParams(videoId, lang);
-    generated.push(params, params.replace(/\+/gu, '-').replace(/\//gu, '_').replace(/=+$/u, ''));
+    generated.push(
+      { value: params, lang },
+      { value: params.replace(/\+/gu, '-').replace(/\//gu, '_').replace(/=+$/u, ''), lang },
+    );
   }
   const paramList = [
-    ...realParams.map((value) => ({ value, label: 'page-params' })),
-    ...generated.map((value) => ({ value, label: 'generated' })),
+    ...realParams.map((value) => ({ value, label: 'page-params', lang: '' })),
+    ...generated.map(({ value, lang }) => ({ value, label: 'generated', lang })),
   ];
 
   for (const client of clients) {
     const url = `https://www.youtube.com/youtubei/v1/get_transcript?key=${client.apiKey}&prettyPrint=false`;
-    for (const { value: params, label } of paramList) {
-      if (signal.aborted) return null;
+    for (const { value: params, label, lang } of paramList) {
+      // 主路径必须快：超时/超次数就停，剩下的交给兜底层
+      if (signal.aborted || attempts >= maxAttempts || Date.now() > deadline) {
+        if (reasons.length === 0) reasons.push(`${client.name}: 超时或达到尝试上限`);
+        break;
+      }
+      attempts += 1;
         try {
           const response = await fetchFn(url, {
             method: 'POST',
@@ -245,7 +259,8 @@ export async function fetchGetTranscript(options: GetTranscriptOptions): Promise
           const lines = parseGetTranscript(text);
           if (lines.length > 0) {
             lastDiagnostic = `get_transcript OK: ${client.name}/${label}, ${lines.length} 行`;
-            return { lines, lang: label, params, via: client.name };
+            // lang 必须是语言码，不能是 'page-params'/'generated' 这种来源标签
+            return { lines, lang: lang || langs[0] || '', params, via: client.name };
           }
           reasons.push(`${client.name}/${label}: ${text.length ? 'no segments' : 'empty body'}`);
         } catch (error) {

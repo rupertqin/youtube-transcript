@@ -1,5 +1,5 @@
 import type { CaptionTrack, ErrorCode, LineFormat, TranscriptLine } from '../types';
-import { parseJson3, parseSrv } from './parse';
+import { isBlockedPayload, parseJson3, parseSrv } from './parse';
 
 export const TIMEDTEXT_PATH = '/api/timedtext';
 /** 2026 版原生字幕面板走的是这个 InnerTube 接口，不是 timedtext。 */
@@ -26,14 +26,30 @@ export function videoIdFromTimedTextUrl(url: string): string | null {
   return match ? match[1] : null;
 }
 
+/**
+ * 从 timedtext URL 取「这条响应是什么语言」。
+ *
+ * tlang 优先：带 tlang 时 `lang` 是**源**轨道语言，`tlang` 才是产出语言。
+ * 之前取 lang 会把机器翻译的结果标成源语言，进而把中文内容按英文缓存。
+ */
 export function langFromTimedTextUrl(url: string): string | null {
-  const match = /[?&](?:lang|tlang)=([\w-]+)/u.exec(url);
-  return match ? match[1] : null;
+  // 先单独找 tlang：正则的 | 按「最左匹配」而不是「选项顺序」，
+  // 写成 (?:tlang|lang) 时 `?lang=en&tlang=zh-Hans` 仍会先命中 lang。
+  const translated = /[?&]tlang=([\w-]+)/u.exec(url);
+  if (translated) return translated[1];
+  const plain = /[?&]lang=([\w-]+)/u.exec(url);
+  return plain ? plain[1] : null;
 }
 
-export function buildTimedTextUrl(baseUrl: string, fmt: 'json3' | 'srv1'): string {
+export function buildTimedTextUrl(
+  baseUrl: string,
+  fmt: 'json3' | 'srv1',
+  tlang?: string | null,
+): string {
   const url = new URL(baseUrl, 'https://www.youtube.com');
   url.searchParams.set('fmt', fmt);
+  // tlang 让 YouTube 把这条轨道机器翻译成目标语言；不传则原样返回
+  if (tlang) url.searchParams.set('tlang', tlang);
   return url.toString();
 }
 
@@ -59,11 +75,12 @@ export async function fetchTimedText(
   baseUrl: string,
   fmt: 'json3' | 'srv1',
   signal: AbortSignal,
+  tlang?: string | null,
 ): Promise<TimedTextOutcome> {
   const format: LineFormat = fmt === 'json3' ? 'json3' : 'srv';
   let response: Response;
   try {
-    response = await fetchFn(buildTimedTextUrl(baseUrl, fmt), {
+    response = await fetchFn(buildTimedTextUrl(baseUrl, fmt, tlang), {
       credentials: 'include',
       signal,
     });
@@ -84,6 +101,10 @@ export async function fetchTimedText(
   const raw = await response.text();
   if (!raw.trim()) {
     return { lines: [], format, code: 'EMPTY_200', detail: 'empty body' };
+  }
+  // 200 + 拦截页：必须当成失败，否则那段提示会被解析成「一条字幕」
+  if (isBlockedPayload(raw)) {
+    return { lines: [], format, code: 'RATE_LIMITED', detail: 'youtube blocked the request (unusual traffic)' };
   }
 
   try {

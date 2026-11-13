@@ -24,103 +24,108 @@ function makeDeps(overrides: Partial<Parameters<typeof harvestTranscript>[0]> = 
   };
 }
 
-describe('抓取兜底链（原版顺序：DOM → 拦截 → 远程）', () => {
-  it('DOM 成功就短路，不再走拦截与远程', async () => {
-    const openPanel = vi.fn(async () => 'panel-node');
+describe('抓取兜底链（完整结构化源优先，DOM 只做同步预览）', () => {
+  it('结构化源一次拿到全部分段就短路，结果标记为完整', async () => {
     const intercept = vi.fn();
     const remote = vi.fn();
-
     const result = await harvestTranscript(
-      makeDeps({ openPanel, dom: async () => outcome('dom'), intercept, remote }),
+      makeDeps({
+        structured: async () => outcome('innertube'),
+        domPreview: () => outcome('dom'),
+        intercept,
+        remote,
+      }),
     );
 
-    expect(result.source).toBe('dom');
+    expect(result.source).toBe('innertube');
+    expect(result.complete).toBe(true);
     expect(result.lines).toHaveLength(3);
-    expect(openPanel).toHaveBeenCalledTimes(1);
     expect(intercept).not.toHaveBeenCalled();
     expect(remote).not.toHaveBeenCalled();
   });
 
-  it('dom 拿到的就是 openPanel 返回的那个面板节点', async () => {
-    const dom = vi.fn(async (panel: unknown) => {
-      expect(panel).toBe('panel-node');
-      return outcome('dom');
-    });
-
-    await harvestTranscript(makeDeps({ openPanel: async () => 'panel-node', dom }));
-    expect(dom).toHaveBeenCalledTimes(1);
-  });
-
-  it('已有缓存捕获时 0ms 命中，连面板都不用开', async () => {
-    const dom = vi.fn(async () => null);
+  it('已截获的完整响应 0ms 命中，连结构化请求都不发', async () => {
+    const structured = vi.fn();
     const result = await harvestTranscript(
       makeDeps({
-        openPanel: async () => 'panel-node',
         cachedIntercept: async () => outcome('intercept'),
-        dom,
+        structured,
+        domPreview: () => null,
         intercept: async () => null,
         remote: async () => null,
       }),
     );
 
     expect(result.source).toBe('intercept');
-    expect(dom).not.toHaveBeenCalled();
+    expect(result.complete).toBe(true);
+    expect(structured).not.toHaveBeenCalled();
   });
 
-  it('DOM 失败后走 ① 拦截，并保留失败记录', async () => {
+  it('DOM 预览只回传、绝不短路：完整结果仍会把它替换掉', async () => {
+    const onPreview = vi.fn();
+    const preview = outcome('dom', 2);
     const result = await harvestTranscript(
       makeDeps({
-        openPanel: async () => 'panel-node',
-        dom: async () => null,
+        domPreview: () => ({ ...preview, complete: false }),
+        onPreview,
+        structured: async () => outcome('innertube', 120),
+        intercept: async () => null,
+        remote: async () => null,
+      }),
+    );
+
+    expect(onPreview).toHaveBeenCalledWith(preview.lines);
+    expect(result.source).toBe('innertube');
+    expect(result.lines).toHaveLength(120);
+  });
+
+  it('结构化源失败后走拦截，并记下失败分类', async () => {
+    const result = await harvestTranscript(
+      makeDeps({
+        structured: async () => null,
         intercept: async () => outcome('intercept'),
         remote: async () => outcome('player'),
       }),
     );
 
     expect(result.source).toBe('intercept');
-    expect(result.failures.map((item) => item.code)).toEqual(['SELECTOR_MISS']);
+    expect(result.failures.map((item) => item.code)).toEqual(['NO_CAPTION_TRACK']);
   });
 
-  it('DOM + 拦截都失败才去问远程', async () => {
+  it('结构化 + 拦截都失败才去问远程', async () => {
     const result = await harvestTranscript(
       makeDeps({
-        openPanel: async () => 'panel-node',
-        dom: async () => null,
+        structured: async () => null,
         intercept: async () => null,
         remote: async () => outcome('player'),
       }),
     );
 
     expect(result.source).toBe('player');
-    expect(result.failures.map((item) => item.code)).toEqual(['SELECTOR_MISS', 'EMPTY_200']);
+    expect(result.failures.map((item) => item.code)).toEqual(['NO_CAPTION_TRACK', 'EMPTY_200']);
   });
 
-  it('全部失败：DOM 结构问题优先上报，避免误报「没字幕」', async () => {
+  it('全部完整源失败：即使有 DOM 预览也报错，不把残缺内容当成功', async () => {
+    const onPreview = vi.fn();
     await expect(
       harvestTranscript(
         makeDeps({
-          openPanel: async () => 'panel-node',
-          dom: async () => null,
+          domPreview: () => outcome('dom'),
+          onPreview,
+          structured: async () => null,
           intercept: async () => null,
-          remote: async () => ({
-            ...outcome('player', 0),
-            failures: [{ source: 'player', code: 'POT_ENFORCED', ms: 30 }],
-          }),
+          remote: async () => null,
         }),
       ),
-    ).rejects.toMatchObject({
-      // 远程说的是 POT_ENFORCED，但 DOM 说「读不到行」——后者才是能动手修的那个
-      code: 'SELECTOR_MISS',
-      failures: [{ code: 'SELECTOR_MISS' }, { code: 'EMPTY_200' }, { code: 'POT_ENFORCED' }],
-    });
+    ).rejects.toBeInstanceOf(HarvestError);
+    expect(onPreview).toHaveBeenCalledTimes(1);
   });
 
   it('远程抛错不会中断链路，错误码跟随该层', async () => {
     await expect(
       harvestTranscript(
         makeDeps({
-          openPanel: async () => 'panel-node',
-          dom: async () => null,
+          structured: async () => null,
           intercept: async () => null,
           remote: async () => {
             throw Object.assign(new Error('boom'), { code: 'NETWORK_ERROR' });
@@ -130,40 +135,74 @@ describe('抓取兜底链（原版顺序：DOM → 拦截 → 远程）', () => 
     ).rejects.toBeInstanceOf(HarvestError);
   });
 
-  it('打开过原生面板就一定收回（成功路径也收）', async () => {
-    const closePanel = vi.fn();
+  it('成功路径也会 await 收起残留的原生面板', async () => {
+    let closed = false;
     await harvestTranscript(
-      makeDeps({ openPanel: async () => 'panel-node', closePanel, dom: async () => outcome('dom') }),
+      makeDeps({
+        structured: async () => outcome('innertube'),
+        closePanel: async () => {
+          await Promise.resolve();
+          closed = true;
+        },
+      }),
     );
-    expect(closePanel).toHaveBeenCalledWith('panel-node');
+    expect(closed).toBe(true);
   });
 
-  it('失败路径同样收回原生面板', async () => {
-    const closePanel = vi.fn();
+  it('失败路径同样 await 收起原生面板', async () => {
+    const closePanel = vi.fn(async () => undefined);
     await expect(
       harvestTranscript(
         makeDeps({
-          openPanel: async () => 'panel-node',
-          closePanel,
-          dom: async () => null,
+          structured: async () => null,
           intercept: async () => null,
           remote: async () => null,
+          closePanel,
         }),
       ),
     ).rejects.toBeInstanceOf(HarvestError);
-    expect(closePanel).toHaveBeenCalledWith('panel-node');
+    expect(closePanel).toHaveBeenCalledTimes(1);
+  });
+
+  it('收面板抛错不影响抓取结果', async () => {
+    const result = await harvestTranscript(
+      makeDeps({
+        structured: async () => outcome('innertube'),
+        closePanel: async () => {
+          throw new Error('no close button');
+        },
+      }),
+    );
+    expect(result.source).toBe('innertube');
+  });
+
+  it('要翻译时远程先跑，不被原文结构化源顶替', async () => {
+    const calls: string[] = [];
+    const result = await harvestTranscript(
+      makeDeps({
+        preferRemote: true,
+        remote: async () => {
+          calls.push('remote');
+          return outcome('player');
+        },
+        structured: async () => {
+          calls.push('structured');
+          return outcome('innertube');
+        },
+      }),
+    );
+    expect(calls).toEqual(['remote']);
+    expect(result.source).toBe('player');
   });
 
   it('中断信号会立即抛出，不会继续往下试', async () => {
     const controller = new AbortController();
     controller.abort();
-
     await expect(
       harvestTranscript({
         signal: controller.signal,
         log: noopLog,
-        openPanel: async () => 'panel-node',
-        dom: async () => outcome('dom'),
+        structured: async () => outcome('innertube'),
         remote: async () => outcome('player'),
       }),
     ).rejects.toBeInstanceOf(HarvestError);

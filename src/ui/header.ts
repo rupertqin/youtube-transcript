@@ -20,11 +20,11 @@ export interface HeaderHandle {
 
 export function createHeader(options: HeaderOptions): HeaderHandle {
   const titleEl = h('p', {
-    class: 'truncate text-[13px] font-semibold leading-tight text-[var(--ytt-text)]',
+    class: 'truncate text-[15px] font-medium leading-[20px] text-[var(--ytt-text)]',
     text: 'Transcript Studio',
   });
   const subtitleEl = h('p', {
-    class: 'truncate text-[10.5px] leading-tight text-[var(--ytt-text-mute)]',
+    class: 'truncate text-[12px] leading-[16px] text-[var(--ytt-text-mute)]',
     text: '等待抓取',
   });
 
@@ -41,7 +41,7 @@ export function createHeader(options: HeaderOptions): HeaderHandle {
   const children: (Node | null)[] = [
     h('div', {
       class:
-        'flex h-6 w-6 shrink-0 items-center justify-center rounded-[7px] bg-gradient-to-br from-[#ff4e45] to-[#ff7a45] text-[11px] font-bold text-white shadow-[0_2px_8px_rgba(255,78,69,0.35)]',
+        'flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] bg-[#ff0000] text-[13px] font-bold text-white',
       text: 'T',
     }),
     h('div', { class: 'min-w-0 flex-1' }, [titleEl, subtitleEl]),
@@ -64,14 +64,18 @@ export function createHeader(options: HeaderOptions): HeaderHandle {
 
   const element = h(
     'header',
-    { class: 'flex h-[52px] shrink-0 items-center gap-2 border-b border-[var(--ytt-border)] px-3' },
+    { class: 'flex h-[56px] shrink-0 items-center gap-3 border-b border-[var(--ytt-border)] px-4' },
     children,
   );
 
   return {
     element,
     setTitle: (text) => setText(titleEl, text),
-    setSubtitle: (text) => setText(subtitleEl, text),
+    setSubtitle(text) {
+      // 空串 = 没有话要说：整行隐藏，不留一条空行把标题顶偏
+      setText(subtitleEl, text);
+      subtitleEl.style.display = text.length > 0 ? '' : 'none';
+    },
     setTheme(theme) {
       themeBtn.replaceChildren(icon(theme === 'light' ? 'sun' : theme === 'system' ? 'monitor' : 'moon'));
       themeBtn.title = `主题：${theme}`;

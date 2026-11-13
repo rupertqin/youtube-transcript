@@ -1,26 +1,49 @@
-import type { ErrorCode, FailureRecord, HarvestResult, Logger, SourceName, SourceOutcome } from '../types';
+import type {
+  ErrorCode,
+  FailureRecord,
+  HarvestResult,
+  Logger,
+  SourceName,
+  SourceOutcome,
+  TranscriptLine,
+} from '../types';
 
 /**
  * 注入式依赖：core 不认识 chrome.*，也不假定自己在哪个 world。
- * 扩展端把 ①②④ 交给 MAIN world bridge，③ 留在 ISOLATED；
- * 油猴端三件事都在同一个进程里直接调。
+ * 扩展端把结构化请求/远程交给 MAIN world bridge，DOM 预览留在 ISOLATED；
+ * 油猴端全部在同一个进程里直接调。
  */
 export interface HarvestDeps {
   /** ② playerResponse.captionTracks + ④ InnerTube 降级 */
   remote?: () => Promise<SourceOutcome | null>;
-  /** ① 等待被动拦截到的 timedtext */
+  /** ① 等待被动拦截到的 timedtext / get_transcript */
   intercept?: (timeoutMs: number) => Promise<SourceOutcome | null>;
-  /** 打开原生 Show transcript 面板（与 ③ 共用同一次点击） */
-  openPanel?: () => Promise<unknown> | unknown;
-  /** 收掉原生面板；只要调过 openPanel 就一定会在结束时被调用（成功/失败/中断都算） */
-  closePanel?: (panel: unknown) => void;
-  /** ③ 从原生面板 DOM 抓取 */
-  dom?: (panel: unknown) => Promise<SourceOutcome | null>;
-  /** ⓪ 先看已经截获的响应（用户此前打开过原生面板时，0ms 命中） */
+  /** ⓪ 已经截获的响应（用户此前打开过原生面板时 0ms 命中） */
   cachedIntercept?: () => Promise<SourceOutcome | null>;
+  /**
+   * 结构化完整源：一次 `get_transcript` 请求拿回全部分段。
+   *
+   * 这是主路径。虚拟列表只渲染视口内的行，靠滚面板凑字幕既慢又会丢前段；
+   * 结构化响应带精确 start/end，从 0:00 到片尾一次到手。
+   */
+  structured?: () => Promise<SourceOutcome | null>;
+  /**
+   * 同步读页面上**已经渲染**的字幕，只作临时预览（complete:false）。
+   * 禁止点击、轮询、滚动 —— 一次同步扫描就返回，绝不短路完整源。
+   */
+  domPreview?: () => SourceOutcome | null | Promise<SourceOutcome | null>;
+  /** 预览回传给会话层，先显示一点内容，完整结果到达后覆盖 */
+  onPreview?: (lines: TranscriptLine[]) => void;
+  /** 收起页面上残留的原生字幕面板；成功/失败/中断都会 await 一次 */
+  closePanel?: () => Promise<unknown> | unknown;
   signal: AbortSignal;
   log: Logger;
   onStage?: (stage: SourceName | 'panel') => void;
+  /**
+   * 先把远程层排到最前面（要翻译、且视频没有该语言原生轨道时）。
+   * 拦截层与 DOM 层只能给视频原文，先命中就会出现「切中文显示英文」。
+   */
+  preferRemote?: boolean;
 }
 
 export class HarvestError extends Error {
@@ -35,7 +58,7 @@ export class HarvestError extends Error {
   }
 }
 
-const INTERCEPT_WAIT_MS = 3500;
+const INTERCEPT_WAIT_MS = 2500;
 
 function interrupted(signal: AbortSignal): HarvestError {
   const error = new HarvestError('UNKNOWN', []);
@@ -45,8 +68,11 @@ function interrupted(signal: AbortSignal): HarvestError {
 }
 
 /**
- * 四层兜底：②播放器(+④InnerTube) → ①被动拦截 → ③原生面板 DOM。
- * 任一层拿到非空行即短路返回，每层失败都留一条分类记录。
+ * 兜底链：**完整结构化源优先，DOM 只做同步预览**。
+ *
+ * 旧的「先开原生面板 → 12 轮轮询 → 60 屏滚动」既慢又只能拿到视口内的行，
+ * 那份残缺结果还会被写进缓存 7 天，表现就是「前面的字幕不见了，
+ * 点清空缓存重抓才拿到全部」。现在预览绝不进缓存、也绝不当最终结果。
  */
 export async function harvestTranscript(deps: HarvestDeps): Promise<HarvestResult> {
   const failures: FailureRecord[] = [];
@@ -73,7 +99,7 @@ export async function harvestTranscript(deps: HarvestDeps): Promise<HarvestResul
           ms: Date.now() - started,
           meta: { lines: outcome.lines.length },
         });
-        return outcome;
+        return { ...outcome, complete: outcome.complete !== false };
       }
       // 这一层没自报分类时补一条，保证最终错误码指向真正失败的那一层
       if (failures.length === before) {
@@ -83,6 +109,7 @@ export async function harvestTranscript(deps: HarvestDeps): Promise<HarvestResul
       deps.log({ code: reported?.code ?? emptyCode, source: name, ms: Date.now() - started, detail: 'empty' });
       return null;
     } catch (error) {
+      if (deps.signal.aborted) throw interrupted(deps.signal);
       const code: ErrorCode =
         error && typeof error === 'object' && 'code' in error
           ? ((error as { code: ErrorCode }).code ?? 'UNKNOWN')
@@ -93,58 +120,62 @@ export async function harvestTranscript(deps: HarvestDeps): Promise<HarvestResul
     }
   };
 
-  // ② + ④
-  // 顺序与 1.x 一致：先打开原生面板读 DOM，读不到再退拦截，最后才去问远程。
-  // ①②④ 已经被 POT 挡住的视频里，DOM 是唯一能出结果的一层，放在最后只会白等。
-  let panelPromise: Promise<unknown> = Promise.resolve(null);
-  const willOpenPanel = Boolean(deps.openPanel);
-  if (deps.openPanel) {
-    deps.onStage?.('panel');
-    panelPromise = Promise.resolve()
-      .then(() => deps.openPanel!())
-      .catch(() => null);
-  }
-
   try {
-    // ⓪ 已经截获的 get_transcript / timedtext 响应优先：不等待、不记失败
+    // ⓪ 明确要翻译时先问远程：它是唯一能产出目标语言的层。
+    let remoteTried = false;
+    if (deps.preferRemote && deps.remote) {
+      remoteTried = true;
+      const remote = await step('player', 'NO_CAPTION_TRACK', deps.remote);
+      if (remote) return { ...remote, failures };
+    }
+
+    // ⓪.5 已截获的完整响应：0ms 命中，不等待、不记失败
     if (deps.cachedIntercept && !deps.signal.aborted) {
       const cached = await deps.cachedIntercept().catch(() => null);
       if (cached && cached.lines.length > 0) {
         deps.log({ code: 'OK', source: 'intercept', ms: 0, meta: { lines: cached.lines.length } });
-        return { ...cached, failures };
+        return { ...cached, complete: true, failures };
       }
     }
 
-    // ③ DOM（原版路径）
-    if (deps.dom) {
-      const panel = await panelPromise;
-      const dom = await step('dom', 'SELECTOR_MISS', () => deps.dom!(panel));
-      if (dom) return { ...dom, failures };
+    // ① 同步预览：一次扫描已渲染的文字，先给用户看点东西。
+    //    它只有视口内的行，**绝不短路**后面的完整源。
+    if (deps.domPreview && !deps.signal.aborted) {
+      const preview = await Promise.resolve(deps.domPreview()).catch(() => null);
+      if (preview && preview.lines.length > 0 && !deps.signal.aborted) {
+        deps.onPreview?.(preview.lines);
+      }
     }
 
-    // ① 拦截：面板打开的瞬间播放器/面板自己会发请求，这一步通常能直接命中已捕获的响应
+    // ② 结构化完整源：主路径，一次请求拿全部分段
+    if (deps.structured) {
+      const structured = await step('innertube', 'NO_CAPTION_TRACK', deps.structured);
+      if (structured) return { ...structured, failures };
+    }
+
+    // ③ 被动拦截：等 YouTube 自己发出的字幕响应（短等，不再 3.5s 白等）
     if (deps.intercept) {
       const intercepted = await step('intercept', 'EMPTY_200', () => deps.intercept!(INTERCEPT_WAIT_MS));
       if (intercepted) return { ...intercepted, failures };
     }
 
-    // ② + ④ 远程
-    if (deps.remote) {
+    // ④ 远程（preferRemote 时已经跑过，不重复抓）
+    if (deps.remote && !remoteTried) {
       const remote = await step('player', 'NO_CAPTION_TRACK', deps.remote);
       if (remote) return { ...remote, failures };
     }
 
-    // DOM 是主路径：它因为结构问题失败时优先报它，否则会误报「这个视频没有字幕轨迹」
-    const domStructural = failures.find((item) => item.source === 'dom' && item.code === 'SELECTOR_MISS');
-    const lastCode = domStructural?.code ?? (failures.length > 0 ? failures[failures.length - 1].code : 'NO_CAPTION_TRACK');
+    // 所有完整源都失败：不把预览留成「成功结果」，否则又变成缺前段的字幕
+    const lastCode = failures.length > 0 ? failures[failures.length - 1].code : 'NO_CAPTION_TRACK';
     throw new HarvestError(lastCode, failures);
   } finally {
-    // 原生面板只是抓取载体：成功、失败、被中断都要收掉，否则页面会同时挂着两套字幕 UI
-    if (willOpenPanel && deps.closePanel) {
+    // 页面上残留的原生面板（旧版本留下的、或用户自己点开的）一律收掉。
+    // 必须 await：同步点一下经常赶不上 YouTube 的异步 DOM 更新。
+    if (deps.closePanel) {
       try {
-        deps.closePanel(await panelPromise);
+        await deps.closePanel();
       } catch {
-        /* 关闭失败不影响结果 */
+        /* 收面板失败不影响抓取结果 */
       }
     }
   }

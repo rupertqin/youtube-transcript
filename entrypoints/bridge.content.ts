@@ -4,6 +4,7 @@ import { installTimedTextHook } from '../src/core/harvest/intercept';
 import { linesFromCapture } from '../src/core/harvest/sources';
 import { runRemoteSources } from '../src/core/harvest/sources';
 import { readStoryboardSpec } from '../src/core/harvest/player';
+import { langMatches } from '../src/core/langs';
 import { log } from '../src/core/log';
 import type { HarvestContext } from '../src/core/types';
 import { createBridgeEndpoint } from '../src/platform/bridge';
@@ -43,7 +44,8 @@ export default defineContentScript({
       if (!videoId) return null;
 
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 12000);
+      // 主路径必须快：结构化源排在最前，卡住会拖慢整条链
+      const timer = setTimeout(() => controller.abort(), 8_000);
       try {
         const outcome = await fetchGetTranscript({
           win: window,
@@ -51,14 +53,17 @@ export default defineContentScript({
           videoId,
           langs: payload?.langs ?? ['zh-Hans', 'zh', 'en'],
           signal: controller.signal,
+          timeoutMs: 6_000,
+          maxAttempts: 10,
         });
         if (!outcome) return null;
         return {
           lines: outcome.lines,
-          source: 'intercept',
+          source: 'innertube',
           track: { baseUrl: `get_transcript:${outcome.params}`, languageCode: outcome.lang },
           showTimestamps: true,
           failures: [],
+          complete: true,
         };
       } finally {
         clearTimeout(timer);
@@ -66,7 +71,7 @@ export default defineContentScript({
     });
 
     endpoint.handle('HARVEST_REMOTE', async (raw) => {
-      const payload = raw as { videoId?: string; langs?: string[] } | null;
+      const payload = raw as { videoId?: string; langs?: string[]; tlang?: string | null } | null;
       const videoId = payload?.videoId;
       if (!videoId) return null;
 
@@ -75,6 +80,7 @@ export default defineContentScript({
       const ctx: HarvestContext = {
         videoId,
         langs: payload?.langs ?? ['zh-Hans', 'zh', 'en'],
+        tlang: payload?.tlang ?? null,
         signal: controller.signal,
         log,
       };
@@ -95,12 +101,17 @@ export default defineContentScript({
     });
 
     endpoint.handle('WAIT_TIMEDTEXT', async (raw) => {
-      const payload = raw as { videoId?: string; timeoutMs?: number } | null;
+      const payload = raw as { videoId?: string; timeoutMs?: number; tlang?: string | null } | null;
       const videoId = payload?.videoId;
       if (!videoId) return null;
 
       const capture = await hook.waitFor(videoId, payload?.timeoutMs ?? 2500);
       if (!capture) return null;
+
+      // 要的是另一种语言，但捕获到的是原声轨道：这一层给不了翻译结果，
+      // 放行就会「切成中文显示英文」且状态是 ready，用户看不出问题。
+      const tlang = payload?.tlang ?? null;
+      if (tlang && !langMatches(capture.lang, tlang)) return null;
 
       const lines = linesFromCapture(capture);
       if (lines.length === 0) return null;

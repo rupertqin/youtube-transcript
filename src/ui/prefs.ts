@@ -1,5 +1,5 @@
+import type { LangChoice } from '../core/langs';
 import type { ContentView } from '../core/types';
-import type { SharedPrefs } from '../legacy/contract';
 
 export type ThemePref = 'system' | 'light' | 'dark';
 
@@ -9,31 +9,28 @@ export interface Prefs {
   timestamps: boolean;
   /** lines = 字幕，chapters = 章节；两个入口共用 */
   view: ContentView;
+  /** 想要哪种语言的字幕：auto = 同音频（原声轨道） */
+  lang: LangChoice;
 }
 
 const DEFAULT_PREFS: Prefs = {
   theme: 'dark',
   timestamps: true,
   view: 'lines',
+  lang: 'auto',
 };
 const STORAGE_KEY = 'ytt-prefs';
 
 /**
- * 1.x 原版按钮是独立 IIFE，读不到本模块的内存态；
- * 每次变更都同步写一份到 globalThis，两个入口因此共用同一设置。
+ * 落盘。
+ *
+ * 偏好只落一处：扩展走 chrome.storage，油猴走 localStorage。
  */
-function publishShared(prefs: Prefs): void {
-  const shared: SharedPrefs = {
-    timestamps: prefs.timestamps,
-    view: prefs.view,
-  };
-  globalThis.__yttSharedPrefs = shared;
-  // 原版按钮的 Shift/Alt 快捷切换走这个钩子，改完后新版 UI 也会重渲染
-  globalThis.__yttSetSharedPrefs = (patch) => setPrefs(patch);
+function persistLocal(prefs: Prefs): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...cached, ...shared }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
   } catch {
-    /* 扩展的 isolated world 里可能没有 localStorage，globalThis 已足够 */
+    /* 扩展的 isolated world 里可能没有 localStorage，chrome.storage 会兜住 */
   }
 }
 
@@ -60,7 +57,7 @@ try {
     if (area !== 'local' || !changes[STORAGE_KEY]) return;
     const value = changes[STORAGE_KEY].newValue as Partial<Prefs> | undefined;
     cached = { ...DEFAULT_PREFS, ...value };
-    publishShared(cached);
+    persistLocal(cached);
     notify();
   });
 } catch {
@@ -86,7 +83,7 @@ export async function loadPrefs(): Promise<void> {
       const value = result?.[STORAGE_KEY] as Partial<Prefs> | undefined;
       if (value) {
         cached = { ...DEFAULT_PREFS, ...value };
-        publishShared(cached);
+        persistLocal(cached);
         notify();
       }
       return;
@@ -94,18 +91,18 @@ export async function loadPrefs(): Promise<void> {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       cached = { ...DEFAULT_PREFS, ...(JSON.parse(raw) as Partial<Prefs>) };
-      publishShared(cached);
+      persistLocal(cached);
       notify();
     }
   } catch {
     /* 读不到就用默认值 */
   }
-  publishShared(cached);
+  persistLocal(cached);
 }
 
 export function setPrefs(patch: Partial<Prefs>): void {
   cached = { ...cached, ...patch };
-  publishShared(cached);
+  persistLocal(cached);
   notify();
   try {
     const store = chromeStorage();

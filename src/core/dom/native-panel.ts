@@ -1,41 +1,81 @@
 import type { TranscriptLine } from '../types';
-import type { LegacyV19 } from '../../legacy/contract';
-import { dumpStructureSummary } from './dump';
-import { deepElements, deepQueryAll } from './shadow';
-import { parseTimecode } from './text-rows';
-import { sleep } from './wait';
+import { readPlayerVideoId } from '../harvest/player';
+import { deepElements } from './shadow';
+import { parseTimecode, parseTimecodeRows } from './text-rows';
+import { formatTimestamp } from '../format/export';
+import { contentSignature } from '../format/fingerprint';
 
 /**
- * 「逐步转移」第 2 步：只调用 verbatim-runtime.js 里原版 v1.9 自己的提取函数。
+ * DOM 预览层：同步读页面上**已经渲染**的字幕文字。
  *
- * 关键顺序修正（用户指出的「卡住的地方不对」）：
- * 原版 onclick 先 openTranscriptPanel() 再读文字；2026 版面板 target-id 变成
- * PAmodern_transcript_view，pickPanel() 认不出，于是去点 Show transcript ——
- * 而面板本来就开着（页面上有 Close transcript 按钮），这一下把它关掉了，
- * 字幕行随之消失，最后弹 Could not find the transcript panel。
+ * 这里**不点击、不等待、不滚动**：一次可见文本扫描就返回。
+ * 虚拟列表只渲染视口内的行，所以这份结果天生不完整，只能临时显示
+ * （`complete: false`），绝不写缓存、绝不短路结构化完整源。
+ * 靠滚面板凑全字幕既慢又会漏行，那条路已经彻底删掉。
  *
- * 现在按钮的职责回到「复制已有文字」：**先同步快照当前 DOM，命中就立刻返回，
- * 绝不点击任何按钮、不发任何请求**；只有确实读不到时才尝试打开面板。
+ * 切页之后，与上一条视频内容完全一致的快照一律丢弃（`avoidSignature`）。
  */
 
 let lastDiagnostic = '';
 let snapshotDiagnostic = '';
 
-export function getLegacyDiagnostic(): string {
+export function getDomDiagnostic(): string {
   return lastDiagnostic;
 }
 
 const LEADING_TIME = /^(\d{1,2}:\d{2}(?::\d{2})?)\s*(.*)$/u;
 const TIMECODE_ROW = /^\d{1,2}:\d{2}(?::\d{2})?\s/u;
-const TIMECODE_ANY = /\d{1,2}:\d{2}(?::\d{2})?/u;
 
-function v19(): LegacyV19 | null {
-  return globalThis.__yttLegacyV19 ?? null;
-}
-
-export interface LegacyExtractResult {
+export interface NativePanelResult {
   lines: TranscriptLine[];
   showTimestamps: boolean;
+}
+
+export interface NativePanelOptions {
+  /**
+   * 目标视频 id。
+   *
+   * SPA 切页时地址栏先变、播放器后变，这段时间 DOM 里挂着的还是上一个视频
+   * 的字幕行。带上这个参数就能在开抓前把它认出来并放弃，否则面板会一直
+   * 显示上一个视频的内容。
+   */
+  videoId?: string;
+  /**
+   * 刚切换过视频：不要用「页面现有文字」直接返回。
+   *
+   * 原生面板里的行不携带 videoId，切页后 YouTube 还会留着上一页的行，
+   * 光靠播放器 id 校验不出来。这种时候必须让面板按新视频重新渲染一次，
+   * 宁可多花几百毫秒。
+   */
+  skipSnapshot?: boolean;
+  /**
+   * 切换前那条视频的内容指纹。
+   *
+   * 这是切页后**唯一有效**的判据：旧面板里的行不带 videoId，而播放器已经切到
+   * 新视频，`staleVideoNote()` 必然放行。凡是与它完全一致的内容，一律当成
+   * 「原生面板还没重建」丢弃，继续等或换下一层。
+   */
+  avoidSignature?: string | null;
+}
+
+/**
+ * DOM 里的内容是否还属于**另一个**视频。
+ * 返回 null 表示无法判断（没有 window、播放器还没就绪），此时不拦截 ——
+ * 宁可多试一次，也不能在首屏把正常抓取误杀。
+ */
+function staleVideoNote(doc: Document, expected?: string): string | null {
+  if (!expected) return null;
+  const win = (doc.defaultView ?? (typeof window === 'undefined' ? null : window)) as Window | null;
+  if (!win) return null;
+
+  let actual: string | null = null;
+  try {
+    actual = readPlayerVideoId(win);
+  } catch {
+    return null;
+  }
+  if (!actual || actual === expected) return null;
+  return `videoId mismatch: expected=${expected} actual=${actual}`;
 }
 
 function toLines(text: string): TranscriptLine[] {
@@ -64,52 +104,45 @@ function cleanRow(row: string): boolean {
   return true;
 }
 
-function longestIncreasingRun(rows: string[]): string[] {
-  let best: string[] = [];
-  let current: string[] = [];
+type Row = { start: number; text: string };
+
+function longestIncreasingRun(rows: Row[]): Row[] {
+  let best: Row[] = [];
+  let current: Row[] = [];
   let lastMs = -1;
 
   for (const row of rows) {
-    const match = LEADING_TIME.exec(row);
-    const ms = match ? parseTimecode(match[1]) : null;
-    const usable = ms !== null && cleanRow(row);
-    const continuous = usable && current.length > 0 && ms! > lastMs && ms! - lastMs <= MAX_SUBTITLE_GAP_MS;
+    const usable = row.start >= 0 && cleanRow(row.text);
+    const continuous =
+      usable && current.length > 0 && row.start > lastMs && row.start - lastMs <= MAX_SUBTITLE_GAP_MS;
     if (continuous) {
       current.push(row);
     } else {
       if (current.length > best.length) best = current;
       current = usable ? [row] : [];
     }
-    lastMs = usable ? ms! : -1;
+    lastMs = usable ? row.start : -1;
   }
   return current.length > best.length ? current : best;
 }
 
-/**
- * 构造一个 querySelector 恒为 null 的伪 panel，让原版 extractFallback
- * 的 `scope = panel`，从而把我们给的文本按它自己的时间码规则切开。
- * 提取逻辑一字不改，只换「喂给它什么文本」。
- */
-function pseudoPanel(raw: string): Element {
-  return { querySelector: () => null, innerText: raw } as unknown as Element;
+/** 一段原始文本里，有没有像字幕那样「连续递增」的时间码行。 */
+function pickRows(raw: string): Row[] {
+  const rows = parseTimecodeRows(raw)
+    .filter((row) => row.start >= 0 && row.text.length > 0)
+    .map((row) => ({ start: row.start, text: row.text }));
+  return longestIncreasingRun(rows);
 }
 
 /**
  * 同步读取当前页面上的字幕文字，不点击、不等待、不发请求。
  *
- * 文本源只用可见文本：body.innerText（原版注释明确用它排除隐藏节点），
- * 以及穿透 shadow root 后含时间码的候选元素。**不再用 body.textContent** ——
- * 它会把页面内嵌的 ytInitialData JSON（章节列表）也带进来，切出
- * `28:14 ] — Rethinking…\n[` 这种假字幕。
- * 每个源都交给**同一个原版 extractFallback()**，取时间戳最长递增段。
+ * 文本源只用可见文本：body.innerText（排除隐藏节点），以及穿透 shadow root
+ * 后含时间码的候选元素。**不用 body.textContent** —— 它会把页面内嵌的
+ * ytInitialData JSON（章节列表）也带进来，切出 `28:14 ] — Rethinking…` 这种假字幕。
+ * 每个源都按时间码切行，取时间戳最长递增段。
  */
 export function snapshotTranscriptText(doc: Document, options: { quick?: boolean } = {}): string {
-  const legacy = v19();
-  if (!legacy) {
-    snapshotDiagnostic = '快照: 原版运行时未加载';
-    return '';
-  }
-
   const sources: { label: string; raw: string }[] = [];
   const body = doc.body as HTMLElement | null;
   if (body) {
@@ -122,7 +155,7 @@ export function snapshotTranscriptText(doc: Document, options: { quick?: boolean
       for (const { elements } of deepElements(doc)) {
         for (const el of elements) {
           const raw = el.textContent || '';
-          if (raw.length > 20 && raw.length < 100000 && TIMECODE_ANY.test(raw)) {
+          if (raw.length > 20 && raw.length < 100000 && TIMECODE_ROW.test(raw)) {
             candidates.push({ label: `<${el.tagName.toLowerCase()}>`, raw });
           }
         }
@@ -135,174 +168,74 @@ export function snapshotTranscriptText(doc: Document, options: { quick?: boolean
     }
   }
 
-  let best = { text: '', rows: 0, label: '' };
+  let best = { rows: [] as Row[], label: '' };
   const hits: string[] = [];
   for (const { label, raw } of sources) {
     if (!raw) continue;
-    let cut = '';
+    let rows: Row[] = [];
     try {
-      cut = legacy.extractFallback(pseudoPanel(raw)).text;
+      rows = pickRows(raw);
     } catch {
       continue;
     }
-    const rows = cut ? cut.split('\n').filter(Boolean) : [];
-    const timed = rows.filter((row) => TIMECODE_ROW.test(row) && cleanRow(row));
-    const segment = longestIncreasingRun(timed);
-    if (segment.length > best.rows) {
-      best = { text: segment.join('\n'), rows: segment.length, label };
-    }
-    if (segment.length >= 3) hits.push(`${label}:${segment.length}`);
+    if (rows.length > best.rows.length) best = { rows, label };
+    if (rows.length >= 3) hits.push(`${label}:${rows.length}`);
   }
 
+  const first = best.rows[0];
   snapshotDiagnostic =
-    `快照: ${sources.length} 个可见文本源；最长递增段 ${best.rows} 行（${best.label || '无'}）` +
+    `快照: ${sources.length} 个可见文本源；最长递增段 ${best.rows.length} 行（${best.label || '无'}）` +
     `；章节间隔>45s 已排除` +
     (hits.length > 0 ? `；命中源 ${hits.slice(0, 4).join(' / ')}` : '') +
-    (best.rows > 0 ? `；预览 ${best.text.split('\n')[0]?.slice(0, 40) ?? ''}` : '');
-  return best.rows >= 3 ? best.text : '';
-}
+    (first ? `；预览 ${first.text.slice(0, 40)}` : '');
 
-/** 面板已经 EXPANDED 时，绝不能再让原版 openTranscriptPanel 去点 Show transcript。 */
-function transcriptPanelExpanded(doc: Document): boolean {
-  try {
-    const expanded = deepQueryAll(doc, '[visibility]').some((el) =>
-      (el.getAttribute('visibility') || '').includes('EXPANDED'),
-    );
-    if (expanded) return true;
-    return deepQueryAll(doc, 'button, [role="button"]').some((el) => {
-      const label = `${el.getAttribute('aria-label') ?? ''} ${el.textContent ?? ''}`;
-      return (
-        /close\s*transcript/iu.test(label) &&
-        typeof el.getClientRects === 'function' &&
-        el.getClientRects().length > 0
-      );
-    });
-  } catch {
-    return false;
-  }
+  if (best.rows.length < 3) return '';
+  return best.rows.map((row) => `${formatTimestamp(row.start)} ${row.text}`).join('\n');
 }
-
-const TAB_SELECTOR = [
-  'button',
-  '[role="tab"]',
-  'yt-chip-cloud-chip-renderer',
-  'yt-tab-shape',
-].join(',');
 
 /**
- * 面板已经 EXPANDED 但停在 Chapters 标签页时，精确点「Transcript」标签，
- * 让 YouTube 自己渲染字幕行（并发它自己的 get_transcript 请求）。
+ * 读一次页面上已渲染的字幕，作为**临时预览**。
  *
- * 只认文案**恰好**等于 Transcript 的元素，因此不会误点：
- *   Show transcript（描述区的入口）、Copy Transcript（原版按钮）、
- *   Transcript v2.x（我们自己的按钮）。
- * 这一步属于新版 dom 层；逐字节的 verbatim-runtime.js 与它注入的按钮不受影响。
+ * 归属校验两道：
+ * - `videoId`：播放器还停在别的视频时，页面文字必然不属于当前视频；
+ * - `avoidSignature`：旧面板里的行不带 videoId，播放器却已经切到新视频，
+ *   这时只有「内容和上一条完全一样」能认出它是残留。
  */
-async function switchToTranscriptTab(doc: Document): Promise<string> {
-  let candidates: Element[] = [];
-  try {
-    candidates = deepQueryAll(doc, TAB_SELECTOR);
-  } catch {
-    return 'Transcript 标签查询失败';
-  }
-
-  const tabs = candidates.filter((el) => {
-    if (el.id === 'ytt-entry-btn' || el.id === 'copy-transcript-btn') return false;
-    const label = (el.textContent || '').replace(/\s+/gu, ' ').trim();
-    const aria = (el.getAttribute('aria-label') || '').trim();
-    return /^transcript$/iu.test(label) || /^transcript$/iu.test(aria);
-  });
-  if (tabs.length === 0) return `未找到 Transcript 标签（可点候选 ${candidates.length} 个）`;
-
-  const tab = tabs[0] as HTMLElement;
-  if (typeof tab.click !== 'function') return 'Transcript 标签不可点击';
-
-  // 已经选中就别再点。2026 的 chip 是开关式按钮：再点一次会把
-  // 整个字幕面板收起（用户看到的就是「原版字幕框消失」）。
-  const pressed = (
-    tab.getAttribute('aria-pressed') ||
-    tab.getAttribute('aria-selected') ||
-    ''
-  ).toLowerCase();
-  const cls = tab.getAttribute('class') || '';
-  const alreadyOn =
-    pressed === 'true' || /\b(selected|active|is-on)\b/iu.test(cls);
-  if (alreadyOn) {
-    return `Transcript 标签已选中，跳过点击（避免把它收起）<${tab.tagName.toLowerCase()}>`;
-  }
-
-  tab.click();
-  await sleep(300);
-  return `已点击 Transcript 标签 <${tab.tagName.toLowerCase()} class="${(tab.getAttribute('class') || '').slice(0, 40)}">（匹配 ${tabs.length} 个）`;
-}
-
-export async function extractTranscriptLegacy(doc: Document): Promise<LegacyExtractResult> {
-  const legacy = v19();
+export function readDomPreview(doc: Document, options: NativePanelOptions = {}): NativePanelResult {
   const notes: string[] = [];
 
-  // ⓪ 先读已有文字：命中就返回，一个按钮都不点
-  let text = snapshotTranscriptText(doc);
+  const beforeStart = staleVideoNote(doc, options.videoId);
+  if (beforeStart) {
+    notes.push(`${beforeStart} → 放弃 DOM 预览`);
+    lastDiagnostic = notes.join('；');
+    return { lines: [], showTimestamps: false };
+  }
+
+  if (options.skipSnapshot) {
+    notes.push('刚切页：跳过页面现有文字，等待完整字幕');
+    lastDiagnostic = notes.join('；');
+    return { lines: [], showTimestamps: false };
+  }
+
+  const text = snapshotTranscriptText(doc, { quick: true });
   notes.push(snapshotDiagnostic);
-  if (text) notes.push('采用当前 DOM 快照（未点击任何按钮、未发请求）');
+  let rows = text ? toLines(text) : [];
+  if (rows.length > 0) notes.push('同步读取已渲染的字幕（预览，未点击任何按钮）');
 
-  if (!text && legacy) {
-    // ① 面板已 EXPANDED 但停在 Chapters：点 Transcript 标签让 YouTube 渲染字幕行。
-    //    不再点 Show transcript —— 那会把已经展开的面板关掉。
-    notes.push(await switchToTranscriptTab(doc));
-
-    // ② 等渲染。面板是虚拟列表，行可能分批出现，所以轮询快照
-    for (let i = 0; i < 12 && !text; i += 1) {
-      await sleep(250);
-      const after = snapshotTranscriptText(doc);
-      if (after) {
-        text = after;
-        notes.push(`切标签后第 ${i + 1} 次轮询读出 ${after.split('\n').length} 行`);
-      }
-    }
-    if (!text) notes.push(`切标签后快照实况: ${snapshotDiagnostic}`);
-
-    // ③ 仍读不到 → 走逐字节原版的完整流程。
-    //    user-script.js 修好后，openTranscriptPanel() 自己能认出 2026 面板、
-    //    字幕行一出现就返回，不再需要「面板已展开就跳过」这层保护；
-    //    pickPanel() 只在能切出连续字幕行时才认面板，所以早退分支也不会误点。
-    if (!text) {
-      notes.push(
-        `切标签后仍无字幕 → 走原版 openTranscriptPanel（${
-          transcriptPanelExpanded(doc) ? '面板已展开' : '面板未展开'
-        }）`,
-      );
-      const panel = await legacy.openTranscriptPanel();
-      if (panel) {
-        notes.push(
-          `原版面板识别成功 <${panel.tagName.toLowerCase()} target-id="${panel.getAttribute('target-id') ?? ''}">`,
-        );
-        const result = await legacy.extractTranscript(panel);
-        if (result.text) {
-          text = result.text;
-          notes.push(`原版 extractTranscript → ${result.text.length} 字符`);
-        }
-      } else {
-        notes.push('原版 openTranscriptPanel 未找到面板（原版此时会弹 Could not find…）');
-      }
-      const after = snapshotTranscriptText(doc);
-      notes.push(`原版流程后快照: ${after ? `${after.split('\n').length} 行` : '仍为空'}`);
-      if (after && after.length > text.length) {
-        text = after;
-        notes.push('改用原版流程后的快照');
-      }
-    }
+  const avoid = options.avoidSignature ?? null;
+  if (avoid && rows.length > 0 && contentSignature(rows) === avoid) {
+    notes.unshift('丢弃与上一条视频相同的内容 1 次（原生面板尚未按新视频重建）');
+    rows = [];
   }
 
-  const lines = toLines(text);
-  const parts = [`原版运行时: ${lines.length} 行 / ${text.length} 字符`, ...notes];
-  if (lines.length === 0) {
-    try {
-      parts.push('--- 页面结构摘要 ---', dumpStructureSummary(doc));
-    } catch (error) {
-      parts.push(`页面结构摘要失败: ${String(error)}`);
-    }
-  }
-  lastDiagnostic = parts.join('；');
+  lastDiagnostic = [`DOM 预览: ${rows.length} 行`, ...notes].join('；');
+  return { lines: rows, showTimestamps: rows.some((row) => row.start >= 0) };
+}
 
-  return { lines, showTimestamps: lines.length > 0 };
+/** 兼容旧调用点：DOM 预览是同步的，保持 async 签名避免逐个改宿主。 */
+export async function extractFromNativePanel(
+  doc: Document,
+  options: NativePanelOptions = {},
+): Promise<NativePanelResult> {
+  return readDomPreview(doc, options);
 }

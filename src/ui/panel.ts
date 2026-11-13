@@ -1,3 +1,5 @@
+import { clearCache } from '../core/cache';
+import { langMatches, pickUsableChoice } from '../core/langs';
 import { copyText, downloadFile } from '../core/io';
 import { findChapterIndex } from '../core/lines';
 import {
@@ -12,10 +14,8 @@ import { frameAt } from '../core/storyboard';
 import type { ExportFormat, PanelState, TranscriptLine } from '../core/types';
 import type { TranscriptClient } from '../platform/types';
 import { clear, h, show } from './dom';
-import { dumpPageStructure } from '../core/dom/dump';
 import { renderEmptyState, type EmptyKind } from './empty-state';
 import { createHeader } from './header';
-import { SOURCE_LABEL } from './labels';
 import { getPrefs, loadPrefs, onThemeResolved, setPrefs, subscribePrefs } from './prefs';
 import { applyRowState, createRow } from './row';
 import { buildIndex } from './search';
@@ -25,20 +25,47 @@ import { createVirtualList, type VirtualListHandle } from './virtual-list';
 
 const THEME_ORDER = ['dark', 'light', 'system'] as const;
 
+/**
+ * 面板状态是否属于「别的视频」。
+ *
+ * 只要地址栏能读到 id 且与面板状态不一致，就判定为陈旧：此时界面上的一切
+ * （标题、行、复制按钮）都是过期数据，必须整体退场。返回 false 的两种情况
+ * 都是「无法判断」——没有地址栏 id，或面板还没绑定视频，都不该误杀。
+ */
+export function isStalePanelState(
+  videoId: string | null | undefined,
+  pageVideoId: string | null | undefined,
+): boolean {
+  if (!videoId || !pageVideoId) return false;
+  return videoId !== pageVideoId;
+}
+
 export interface PanelOptions {
   client: TranscriptClient;
-  variant: 'overlay' | 'sidepanel';
+  /** sidebar = 嵌进 YouTube 右栏的卡片；sidepanel = 扩展侧栏；overlay = 旧浮层 */
+  variant: 'overlay' | 'sidepanel' | 'sidebar';
   onClose?: () => void;
+  /**
+   * 地址栏当前视频。用来做「可见即正确」的闸门：
+   * 面板状态与它不一致时绝不渲染旧内容，只显示切换中，从 UI 层断掉
+   * 「切页后一直显示上一个视频」这种可能。
+   */
+  currentVideoId?: () => string | null;
 }
 
 export interface PanelHandle {
   element: HTMLElement;
   relayout(): void;
+  /**
+   * 主动重画一次。用于「页面视频变了但 store 还没变」的窗口期：
+   * 新鲜度闸门要靠它立刻把旧内容退掉，而不是等下一次 store 通知。
+   */
+  refresh(): void;
   destroy(): void;
 }
 
 export function createPanel(options: PanelOptions): PanelHandle {
-  const { client, variant, onClose } = options;
+  const { client, variant, onClose, currentVideoId } = options;
 
   let state: PanelState = client.getState();
   let needle = '';
@@ -55,6 +82,9 @@ export function createPanel(options: PanelOptions): PanelHandle {
   let loadedFor = '';
   let followedKey = '';
   let stopTheme: (() => void) | null = null;
+  /** 面板状态是否属于「别的视频」——为真时一律不渲染旧内容 */
+  let staleNow = false;
+  let staleKey = '';
 
   /**
    * 实际生效的视图：偏好是 chapters 但这个视频没有章节时回退到字幕，
@@ -69,6 +99,14 @@ export function createPanel(options: PanelOptions): PanelHandle {
 
   const showTimestamps = (): boolean =>
     getPrefs().timestamps && viewRows().some((line) => line.start >= 0);
+
+  /**
+   * 这条视频能不能出某种语言的字幕。
+   * availableLangs = 原生轨道 ∪ YouTube 支持的翻译目标；空数组表示还没读到或没有字幕，
+   * 这时一个语言按钮都不显示 —— 给一个点了没反应的按钮更糟。
+   */
+  const hasLang = (target: 'zh' | 'en'): boolean =>
+    state.availableLangs.some((code) => langMatches(code, target));
 
   /**
    * 章节高亮按「真实播放位置落在哪个章节区间」算。
@@ -95,6 +133,8 @@ export function createPanel(options: PanelOptions): PanelHandle {
     onQueryChange: (value) => applyQuery(value),
     onJump: (direction) => jump(direction),
     onToggleTimestamps: () => setPrefs({ timestamps: !getPrefs().timestamps }),
+    // 再点一次已选中的语言 = 回到「同音频」
+    onSelectLang: (choice) => setPrefs({ lang: getPrefs().lang === choice ? 'auto' : choice }),
     onToggleView: () => {
       if (state.chapters.length === 0) return;
       needle = '';
@@ -131,7 +171,12 @@ export function createPanel(options: PanelOptions): PanelHandle {
   const main = h('main', { class: 'relative min-h-0 flex-1' }, [listHost, emptyHost]);
 
   /* ---------------- status ---------------- */
-  const statusBar = createStatusBar();
+  const statusBar = createStatusBar({
+    onClearCache: () => {
+      // 用户怀疑缓存时能一键自证：清掉再抓一次，命中缓存这条线就排除了
+      void clearCache().then(() => client.load(true));
+    },
+  });
 
   const root = h(
     'div',
@@ -176,16 +221,20 @@ export function createPanel(options: PanelOptions): PanelHandle {
     });
   }
 
+  /**
+   * 副标题只说「状态 / 内容从哪来」，**不再报行数** ——
+   * 行数底栏已经有了（`⧉ 147`），两处一起显示等于同一句话写两遍。
+   */
+  /**
+   * 副标题只说**正在进行/失败**这两件事，抓成功后整行隐藏。
+   *
+   * 来源（`DOM`/`播放器`…）和行数底栏已经有了，再在这儿说一遍就是重复；
+   * 「章节来自页面信息」这类话更是没人需要。空串会被 header 直接隐藏。
+   */
   const subtitleText = (): string => {
-    const rows = viewRows();
-    if (rows.length > 0) {
-      const unit = currentView() === 'chapters' ? '个章节' : '行';
-      const source = currentView() === 'chapters' ? '页面章节' : (state.source ? SOURCE_LABEL[state.source] : '未知来源');
-      return `${rows.length} ${unit} · ${source}`;
-    }
-    if (state.status === 'loading' || state.status === 'idle') return '抓取中…';
     if (state.status === 'error') return '抓取失败';
-    return '等待抓取';
+    if (state.status === 'loading' || state.status === 'idle') return state.progress || '抓取中…';
+    return '';
   };
 
   const exportMeta = () => ({
@@ -221,7 +270,7 @@ export function createPanel(options: PanelOptions): PanelHandle {
   });
 
   async function handleCopy(): Promise<void> {
-    // 与原版 Copy Transcript 调用同一个 formatCopyText，输出必然一致
+    // 复制走 core/format/copy.ts 的唯一实现，视图/时间戳/清洗规则只有一份
     const text = formatCopyText(viewRows(), copyOptions());
     const ok = await copyText(text || toPlainText(viewRows(), { timestamps: showTimestamps() }));
     if (!ok) return;
@@ -250,13 +299,31 @@ export function createPanel(options: PanelOptions): PanelHandle {
       timestampsAvailable: viewRows().some((line) => line.start >= 0),
       view: currentView(),
       chaptersAvailable: state.chapters.length > 0,
+      // 视频给不了所选语言时按「同音频」显示：按钮不选中，与实际抓取行为一致
+      lang: pickUsableChoice(getPrefs().lang, state.availableLangs),
+      // 中/英都没有就整组隐藏；有哪个就哪个可点，缺的那个置灰
+      showLangGroup: hasLang('zh') || hasLang('en'),
+      zhAvailable: hasLang('zh'),
+      enAvailable: hasLang('en'),
       copied,
       // 章节是页面独立数据：字幕抓取失败时仍可查看/复制章节
-      disabled: !(viewRows().length > 0),
+      disabled: staleNow || !(viewRows().length > 0),
     });
   }
 
   function renderEmpty(): void {
+    if (staleNow) {
+      // 闸门生效：列表整体退场，只留一个「切换中」骨架
+      show(listHost, false);
+      show(emptyHost, true);
+      const key = `stale|${staleKey}`;
+      if (key === emptyKey) return;
+      emptyKey = key;
+      clear(emptyHost);
+      emptyHost.appendChild(renderEmptyState({ kind: 'loading', progress: '正在切换到新视频…' }));
+      return;
+    }
+
     const rows = viewRows();
     // 章节视图只依赖页面数据，字幕抓取失败也能正常显示
     const ready = rows.length > 0 && (currentView() === 'chapters' || state.status === 'ready');
@@ -289,7 +356,6 @@ export function createPanel(options: PanelOptions): PanelHandle {
         progress: state.progress,
         diagnostic: state.diagnostic,
         onRetry: () => void client.load(true),
-        onDump: async () => copyText(dumpPageStructure(document)),
         onClearSearch: () => applyQuery(''),
       }),
     );
@@ -301,9 +367,31 @@ export function createPanel(options: PanelOptions): PanelHandle {
       void client.load();
     }
 
-    header.setTitle(state.title || 'Transcript Studio');
-    header.setSubtitle(subtitleText());
-    statusBar.update(state);
+    // 新鲜度闸门：状态必须属于地址栏现在这条视频。
+    // 两者不一致时（切页后的窗口期、或会话因故没跟上），一律不渲染旧内容 ——
+    // 宁可显示「正在切换」，也绝不把上一个视频的字幕和标题当成当前的给人看。
+    const pageId = currentVideoId?.() ?? null;
+    staleNow = isStalePanelState(state.videoId, pageId);
+    staleKey = staleNow ? `${pageId}|${state.videoId}` : '';
+
+    header.setTitle(staleNow ? '正在切换到新视频…' : state.title || 'Transcript Studio');
+    header.setSubtitle(staleNow ? '同步中…' : subtitleText());
+    statusBar.update(state, pageId);
+
+    if (staleNow) {
+      const gateKey = `stale|${staleKey}`;
+      if (gateKey !== listKey) {
+        listKey = gateKey;
+        indexMap = [];
+        positions = [];
+        listCount = 0;
+        list.setCount(0);
+        lastActive = -1;
+      }
+      renderToolbar();
+      renderEmpty();
+      return;
+    }
 
     // 时间戳开关会改变行结构（有没有时间列），视图切换会换整份数据，
     // storyboard 是异步到的（扩展要过桥），到了也要重渲染出截图 —— 都纳入 key
@@ -360,8 +448,15 @@ export function createPanel(options: PanelOptions): PanelHandle {
     });
   };
 
+  let lastLang = getPrefs().lang;
   const unsubscribePrefs = subscribePrefs(() => {
     applyTheme();
+    // 换语言 = 换内容：必须重抓。缓存按语言分开存，所以这里要强制绕过缓存，
+    // 否则「切到中文」会直接命中上次的英文。
+    if (getPrefs().lang !== lastLang) {
+      lastLang = getPrefs().lang;
+      void client.load(true);
+    }
     render();
   });
 
@@ -377,6 +472,7 @@ export function createPanel(options: PanelOptions): PanelHandle {
   return {
     element: root,
     relayout: () => list.relayout(),
+    refresh: () => render(),
     destroy() {
       unsubscribe();
       unsubscribePrefs();
