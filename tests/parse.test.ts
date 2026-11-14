@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { detectFormat, parseJson3, parseSrv, parseTimedText, parseVtt } from '../src/core/harvest/parse';
 import {
   buildTimedTextUrl,
@@ -8,12 +8,6 @@ import {
 import { pickTrack } from '../src/core/harvest/player';
 import { videoIdFromLocation } from '../src/core/harvest/intercept';
 import { parseGetTranscript, videoIdFromGetTranscriptBody } from '../src/core/harvest/parse/transcript';
-import {
-  buildGetTranscriptParams,
-  fetchGetTranscript,
-  findTranscriptParamsInHtml,
-  getGetTranscriptDiagnostic,
-} from '../src/core/harvest/get-transcript';
 
 describe('json3 解析', () => {
   const raw = JSON.stringify({
@@ -213,6 +207,86 @@ describe('get_transcript（原生面板走的 InnerTube 接口）', () => {
     expect(parseGetTranscript(reversed).map((line) => line.text)).toEqual(['first', 'second', 'third']);
   });
 
+  it('不认渲染器名字：换名 + 换时间戳字段名（startTimeMs）也能解析', () => {
+    // 2026 的结构可能把 transcriptSegmentViewModel 换成别的名字、startMs 换成 startTimeMs。
+    // 只按「有开始时间 + 有文字」判，响应 200 拿到了就不能解析成 0 行。
+    const renamed = JSON.stringify({
+      actions: [
+        {
+          updateEngagementPanelAction: {
+            content: {
+              transcriptRenderer: {
+                content: {
+                  timelineItems: [
+                    { timelineItemViewModel: { startTimeMs: '1000', endTimeMs: '2500', snippet: { content: 'first' } } },
+                    { timelineItemViewModel: { startTimeMs: '2500', snippet: { runs: [{ text: 'sec' }, { text: 'ond' }] } } },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      ],
+    });
+
+    expect(parseGetTranscript(renamed)).toEqual([
+      { start: 1000, dur: 1500, text: 'first' },
+      { start: 2500, dur: 0, text: 'second' },
+    ]);
+  });
+
+  it('2026 时间线面板：没有 startMs，只有 timestamp "0:03" 也能解析', () => {
+    // 真实响应长这样（日志里「200 但 0 段」就是栽在这）：
+    //   {"transcriptSegmentViewModel": {"simpleText": "…", "timestamp": "0:03", …}}
+    // 毫秒只出现在 frameworkUpdates 的 sync 实体里，面板自己只有这种可读时间。
+    const item = (timestamp: string | null, text: string, a11y?: string) => ({
+      macroMarkersPanelItemViewModel: {
+        item: {
+          timelineItemViewModel: {
+            ...(timestamp ? { timestamp } : {}),
+            contentItems: [
+              {
+                transcriptSegmentViewModel: {
+                  simpleText: text,
+                  ...(timestamp ? { timestamp } : {}),
+                  ...(a11y ? { timestampA11yLabel: a11y } : {}),
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+    const payload = JSON.stringify({
+      content: {
+        engagementPanelSectionListRenderer: {
+          content: {
+            sectionListRenderer: {
+              contents: [
+                {
+                  itemSectionRenderer: {
+                    contents: [
+                      item('0:13', 'second'),
+                      item('0:03', 'first'),
+                      item(null, 'third', '1 minute, 30 seconds'),
+                    ],
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+
+    // 按时间排序；没有显式结束时间就用「下一段不同起点」补 dur
+    expect(parseGetTranscript(payload)).toEqual([
+      { start: 3000, dur: 10000, text: 'first' },
+      { start: 13000, dur: 77000, text: 'second' },
+      { start: 90000, dur: 0, text: 'third' },
+    ]);
+  });
+
   it('空响应与坏 JSON 都返回空数组，不抛错', () => {
     expect(parseGetTranscript('')).toEqual([]);
     expect(parseGetTranscript('not json')).toEqual([]);
@@ -226,86 +300,6 @@ describe('get_transcript（原生面板走的 InnerTube 接口）', () => {
   });
 });
 
-describe('get_transcript params 编码', () => {
-  function b64ToBytes(value: string): number[] {
-    return [...atob(value)].map((ch) => ch.charCodeAt(0));
-  }
-
-  it('外层 = {1: videoId, 2: base64(内层)}，内层 = {1: asr, 3: lang, 5: ""}', () => {
-    const params = buildGetTranscriptParams('dQw4w9WgXcQ', 'en');
-    const outer = b64ToBytes(params);
-
-    // field1: 0x0a len=11 videoId
-    expect(outer[0]).toBe(0x0a);
-    expect(outer[1]).toBe(11);
-    expect(String.fromCharCode(...outer.slice(2, 13))).toBe('dQw4w9WgXcQ');
-
-    // field2: 0x12 len=N base64(内层)
-    expect(outer[13]).toBe(0x12);
-    const innerLen = outer[14];
-    const innerB64 = String.fromCharCode(...outer.slice(15, 15 + innerLen));
-    const inner = b64ToBytes(innerB64);
-    expect(inner.slice(0, 5)).toEqual([0x0a, 3, 0x61, 0x73, 0x72]); // "asr"
-    expect(inner.slice(5, 9)).toEqual([0x1a, 2, 0x65, 0x6e]); // "en"
-    expect(inner.slice(9)).toEqual([0x2a, 0]); // field5 空串
-  });
-});
-
-describe('get_transcript 直连的失败可见性', () => {
-  it('ytcfg 读不到时仍会尝试静态客户端上下文，并把原因写进诊断', async () => {
-    const fetchFn = vi.fn(async () => ({ ok: true, text: async () => '{}' }) as Response);
-    const win = {} as Window;
-
-    await expect(
-      fetchGetTranscript({
-        win,
-        fetchFn: fetchFn as unknown as typeof fetch,
-        videoId: 'dQw4w9WgXcQ',
-        langs: ['en'],
-        signal: new AbortController().signal,
-      }),
-    ).rejects.toThrow(/get_transcript/u);
-
-    // 不能像之前那样 0ms 静默退出：至少要把静态上下文都试一遍
-    expect(fetchFn.mock.calls.length).toBeGreaterThanOrEqual(3);
-    expect(getGetTranscriptDiagnostic()).toContain('get_transcript 失败');
-  });
-});
-
-describe('用 YouTube 页面自带的 params', () => {
-  const real = 'CgtEQTEyMzQ1Njc4OXABCgNhcnIQAxoDZW5HKgA%3D';
-
-  it('从 HTML 里的 getTranscriptEndpoint 取出 params', () => {
-    const html = `<script>var ytInitialData = {"engagementPanels":[{"getTranscriptEndpoint":{"params":"${real}"}}]};</script>`;
-    expect(findTranscriptParamsInHtml(html)).toEqual([real]);
-  });
-
-  it('请求时优先使用页面自带的 params，而不是自己拼的 protobuf', async () => {
-    const fetchFn = vi.fn(
-      async (_url: string, _init?: RequestInit) =>
-        ({ ok: false, status: 400, text: async () => 'INVALID_ARGUMENT' }) as Response,
-    );
-    const win = {
-      ytInitialData: { getTranscriptEndpoint: { params: real } },
-    } as unknown as Window;
-
-    await expect(
-      fetchGetTranscript({
-        win,
-        fetchFn: fetchFn as unknown as typeof fetch,
-        videoId: 'dQw4w9WgXcQ',
-        langs: ['en'],
-        signal: new AbortController().signal,
-      }),
-    ).rejects.toThrow(/get_transcript/u);
-
-    const firstBody = JSON.parse((fetchFn.mock.calls[0][1] as RequestInit).body as string);
-    expect(firstBody.params).toBe(real);
-    expect(getGetTranscriptDiagnostic()).toContain('HTTP 400');
-    expect(getGetTranscriptDiagnostic()).toContain('INVALID_ARGUMENT');
-  });
-});
-
 describe('get_transcript 捕获的视频归属', () => {
   it('POST body 里没有 videoId，改从当前页 URL 取', () => {
     const win = (href: string) => ({ location: { href } }) as unknown as Window;
@@ -316,5 +310,91 @@ describe('get_transcript 捕获的视频归属', () => {
       'dQw4w9WgXcQ',
     );
     expect(videoIdFromLocation(win('https://www.youtube.com/'))).toBeNull();
+  });
+});
+
+/**
+ * YouTube 正在把 `*Renderer` 迁移成 `*ViewModel`。
+ * 解析器只认旧名字时，响应明明截到了却解析出 0 行 —— 链路里记成
+ * 「拦截 no lines」，只能退到 DOM 读虚拟列表那一屏，前面的字幕全漏。
+ */
+describe('parseGetTranscript：响应结构改名后仍要解析出字幕', () => {
+  const wrap = (segments: unknown): string =>
+    JSON.stringify({
+      actions: [
+        {
+          updateEngagementPanelAction: {
+            content: {
+              transcriptRenderer: {
+                content: {
+                  transcriptSearchPanelRenderer: {
+                    body: { transcriptSegmentListRenderer: { initialSegments: segments } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      ],
+    });
+
+  it('transcriptSegmentViewModel（新命名）', () => {
+    const rows = parseGetTranscript(
+      wrap([
+        {
+          transcriptSegmentViewModel: {
+            startMs: '0',
+            endMs: '1500',
+            snippet: { content: 'hello' },
+          },
+        },
+        {
+          transcriptSegmentViewModel: {
+            startMs: '1500',
+            endMs: '3000',
+            snippet: { runs: [{ text: 'wor' }, { text: 'ld' }] },
+          },
+        },
+      ]),
+    );
+
+    expect(rows).toEqual([
+      { start: 0, dur: 1_500, text: 'hello' },
+      { start: 1_500, dur: 1_500, text: 'world' },
+    ]);
+  });
+
+  it('文字被挪到更深的容器里也能找到', () => {
+    const rows = parseGetTranscript(
+      wrap([
+        {
+          transcriptSegmentViewModel: {
+            startMs: '2000',
+            endMs: '3000',
+            snippet: { content: { segmentText: { content: 'deep text' } } },
+          },
+        },
+      ]),
+    );
+
+    expect(rows).toEqual([{ start: 2_000, dur: 1_000, text: 'deep text' }]);
+  });
+
+  it('没有时间戳的节点不当成字幕行（章节标题之类）', () => {
+    const rows = parseGetTranscript(
+      wrap([
+        { transcriptSectionViewModel: { title: { content: 'Chapter 1' } } },
+        {
+          transcriptSegmentViewModel: {
+            startMs: '0',
+            endMs: '1000',
+            snippet: { content: 'only this' },
+          },
+        },
+      ]),
+    );
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].text).toBe('only this');
   });
 });

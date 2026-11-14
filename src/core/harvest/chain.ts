@@ -21,7 +21,7 @@ export interface HarvestDeps {
   /** ⓪ 已经截获的响应（用户此前打开过原生面板时 0ms 命中） */
   cachedIntercept?: () => Promise<SourceOutcome | null>;
   /**
-   * 结构化完整源：一次 `get_transcript` 请求拿回全部分段。
+   * 结构化完整源：一次 `get_panel` 请求拿回全部分段。
    *
    * 这是主路径。虚拟列表只渲染视口内的行，靠滚面板凑字幕既慢又会丢前段；
    * 结构化响应带精确 start/end，从 0:00 到片尾一次到手。
@@ -32,6 +32,14 @@ export interface HarvestDeps {
    * 禁止点击、轮询、滚动 —— 一次同步扫描就返回，绝不短路完整源。
    */
   domPreview?: () => SourceOutcome | null | Promise<SourceOutcome | null>;
+  /**
+   * 兜底：所有完整源都失败时，把页面上已渲染的字幕当成结果返回（complete:false）。
+   *
+   * 面板已经渲染出全文却报「这个视频没有字幕轨道」是最糟的结果 ——
+   * 用户看得见字幕，我们却说没有。代价是可能缺前段，所以它
+   * ① `complete:false`，不会被写进 7 天缓存；② 只有别的源全失败才用它。
+   */
+  domFallback?: () => SourceOutcome | null | Promise<SourceOutcome | null>;
   /** 预览回传给会话层，先显示一点内容，完整结果到达后覆盖 */
   onPreview?: (lines: TranscriptLine[]) => void;
   /** 收起页面上残留的原生字幕面板；成功/失败/中断都会 await 一次 */
@@ -165,9 +173,26 @@ export async function harvestTranscript(deps: HarvestDeps): Promise<HarvestResul
       if (remote) return { ...remote, failures };
     }
 
-    // 所有完整源都失败：不把预览留成「成功结果」，否则又变成缺前段的字幕
-    const lastCode = failures.length > 0 ? failures[failures.length - 1].code : 'NO_CAPTION_TRACK';
-    throw new HarvestError(lastCode, failures);
+    // 所有完整源都失败：页面上如果已经渲染出字幕，就别报「没有字幕轨道」。
+    // 这条结果 marked complete:false —— 不进缓存，下次仍然重新抓完整版。
+    if (deps.domFallback) {
+      const fallback = await Promise.resolve(deps.domFallback()).catch(() => null);
+      if (fallback && fallback.lines.length > 0) {
+        deps.log({
+          code: 'OK',
+          source: 'dom',
+          ms: Date.now(),
+          meta: { lines: fallback.lines.length },
+        });
+        return { ...fallback, complete: false, failures };
+      }
+    }
+
+    // 错误码取最有信息量的那一条：优先非 NO_CAPTION_TRACK。
+    // 「400 Precondition check failed」被报成「这个视频没有字幕轨道」会把人完全带偏。
+    const decisive =
+      failures.find((item) => item.code !== 'NO_CAPTION_TRACK') ?? failures[failures.length - 1];
+    throw new HarvestError(decisive?.code ?? 'NO_CAPTION_TRACK', failures);
   } finally {
     // 页面上残留的原生面板（旧版本留下的、或用户自己点开的）一律收掉。
     // 必须 await：同步点一下经常赶不上 YouTube 的异步 DOM 更新。

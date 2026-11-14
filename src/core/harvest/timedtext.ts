@@ -20,6 +20,15 @@ export function isGetTranscriptUrl(url: string): boolean {
   return url.includes(GET_TRANSCRIPT_PATH);
 }
 
+/**
+ * 2026 年原生字幕面板的数据源是 `get_panel`（`panelId: PAmodern_transcript_view`），
+ * 不再是 `get_transcript` —— 后者对我们的请求回 400 Precondition check failed。
+ * 不认这个 URL 就永远截不到面板真正拿到的那份完整字幕。
+ */
+export function isGetPanelUrl(url: string): boolean {
+  return url.includes('/youtubei/v1/get_panel');
+}
+
 /** 从 timedtext URL 上取 v= 参数，用来判断这条响应属于哪个视频。 */
 export function videoIdFromTimedTextUrl(url: string): string | null {
   const match = /[?&]v=([\w-]{6,})/u.exec(url);

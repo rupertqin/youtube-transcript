@@ -164,7 +164,8 @@ export async function runRemoteSources(options: {
  * 拦截层和 MAIN world 桥接层都要用这一份判断。
  */
 export function linesFromCapture(capture: { kind: CaptureKind; text: string }): TranscriptLine[] {
-  return capture.kind === 'get_transcript' ? parseGetTranscript(capture.text) : parseTimedText(capture.text);
+  // get_panel（2026 面板）与 get_transcript 都是结构化 JSON，同一套解析
+  return capture.kind === 'timedtext' ? parseTimedText(capture.text) : parseGetTranscript(capture.text);
 }
 
 /**
@@ -182,7 +183,9 @@ export async function runInterceptSource(
 
   // 请求了翻译、但捕获到的是原声轨道：它满足不了目标语言。
   // 放行就会「切成中文显示英文」，而且状态是 ready，用户完全看不出哪里不对。
-  if (ctx.tlang && !langMatches(capture.lang, ctx.tlang)) {
+  // **只在语言码确实读到了且不符时才丢弃**：`get_transcript` 的 lang 以前恒为 null，
+  // 一见 tlang 就整条丢掉完整响应，结果永远只能退到 DOM 读虚拟列表那一屏。
+  if (ctx.tlang && capture.lang && !langMatches(capture.lang, ctx.tlang)) {
     return {
       lines: [],
       source: 'intercept',
@@ -199,7 +202,23 @@ export async function runInterceptSource(
   }
 
   const lines = linesFromCapture(capture);
-  if (lines.length === 0) return null;
+  if (lines.length === 0) {
+    // 「截到了但解析出 0 行」和「压根没截到」是两回事，必须分开报：
+    // 前者说明响应结构变了（比如 *Renderer → *ViewModel），后者是时机问题。
+    return {
+      lines: [],
+      source: 'intercept',
+      showTimestamps: true,
+      failures: [
+        {
+          source: 'intercept',
+          code: 'EMPTY_200',
+          ms: 0,
+          detail: `截到了 ${capture.kind} 响应（${capture.text.length} 字符）但解析出 0 行`,
+        },
+      ],
+    };
+  }
   return {
     lines,
     source: 'intercept',

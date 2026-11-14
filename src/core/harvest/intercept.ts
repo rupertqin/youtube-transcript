@@ -1,17 +1,33 @@
 import { readPlayerVideoId } from './player';
-import { videoIdFromGetTranscriptBody } from './parse/transcript';
+import { langFromGetTranscriptBody, videoIdFromGetTranscriptBody } from './parse/transcript';
 import {
+  isGetPanelUrl,
   isGetTranscriptUrl,
   isTimedTextUrl,
   langFromTimedTextUrl,
   videoIdFromTimedTextUrl,
 } from './timedtext';
 
-export type CaptureKind = 'timedtext' | 'get_transcript';
+export type CaptureKind = 'timedtext' | 'get_transcript' | 'get_panel';
 
-function captureKind(url: string): CaptureKind | null {
+/**
+ * 打在我们自己发起的请求上的标记。
+ *
+ * hook 补的是全局 `window.fetch`，所以我们自己直连 `get_panel` 的请求
+ * **也会被截下来**。失败时截到的是 119 字符的 400 错误体，它会把捕获缓存污染成
+ * 「已有一条 get_transcript 响应」—— 于是拦截层 0ms 命中垃圾、解析出 0 行，
+ * 真正的面板响应反而等不到。自己发的请求不截。
+ */
+export const SELF_FETCH = Symbol.for('ytt.self-fetch');
+
+function captureKind(url: string, bodyHint?: unknown): CaptureKind | null {
   if (isTimedTextUrl(url)) return 'timedtext';
   if (isGetTranscriptUrl(url)) return 'get_transcript';
+  // get_panel 承载很多面板（评论、章节…），只有字幕那个才截
+  if (isGetPanelUrl(url)) {
+    const body = typeof bodyHint === 'string' ? bodyHint : '';
+    return /transcript/iu.test(body) ? 'get_panel' : null;
+  }
   return null;
 }
 
@@ -125,12 +141,17 @@ export function installTimedTextHook(win: Window): TimedTextHook {
       // 关键：地址栏兜底必须用**请求发出时**的 id，不能用响应到达时的 ——
       // 切页时请求属于旧视频、响应却在新地址栏下到达，用后者会把归属整体搞错。
       videoId:
-        kind === 'get_transcript'
-          ? (videoIdFromGetTranscriptBody(bodyHint) ??
+        kind === 'timedtext'
+          ? videoIdFromTimedTextUrl(url)
+          : (videoIdFromGetTranscriptBody(bodyHint) ??
             atRequestVideoId ??
-            videoIdFromTimedTextUrl(url))
-          : videoIdFromTimedTextUrl(url),
-      lang: langFromTimedTextUrl(url),
+            videoIdFromTimedTextUrl(url)),
+      // get_transcript 的 URL 上没有 lang=，语言码在 params 里；
+      // 读不到就是 null，绝不能当「未知语言」去否决完整响应。
+      lang:
+        kind === 'timedtext'
+          ? langFromTimedTextUrl(url)
+          : (langFromGetTranscriptBody(bodyHint) ?? null),
       text,
       at: Date.now(),
     };
@@ -187,14 +208,20 @@ export function installTimedTextHook(win: Window): TimedTextHook {
   if (typeof originalFetch === 'function') {
     win.fetch = function patchedFetch(this: unknown, ...args: Parameters<typeof fetch>) {
       const promise = originalFetch.apply(this ?? win, args);
+      const init = args[1] as (RequestInit & Record<symbol, unknown>) | undefined;
+      // 自己发的请求不截：失败时那条错误体会污染捕获缓存
+      if (init?.[SELF_FETCH]) return promise;
       const url = requestUrl(args[0]);
-      const kind = captureKind(url);
+      const bodyHint = init?.body;
+      const kind = captureKind(url, bodyHint);
       if (kind) {
-        const bodyHint = (args[1] as RequestInit | undefined)?.body;
         // 同步取：请求属于哪个视频由「发出这一刻」的播放器决定（播放器才拥有这个面板）
         const atRequest = ownerVideoId(win);
         promise
           .then((response) => {
+            // 错误响应（400/403…）不是字幕，截下来只会变成「119 字符解析出 0 行」。
+            // 只在**确实报了错误**时跳过：`ok` 缺失（测试桩 / 老实现）时照旧截获。
+            if (response?.ok === false) return;
             const clone = response.clone();
             clone
               .text()
@@ -232,12 +259,14 @@ export function installTimedTextHook(win: Window): TimedTextHook {
 
     proto.send = function patchedSend(this: XMLHttpRequest & Record<string, unknown>, ...args: unknown[]) {
       const url = String(this[URL_KEY] ?? '');
-      const kind = captureKind(url);
+      const bodyHint = args[0];
+      const kind = captureKind(url, bodyHint);
       if (kind) {
-        const bodyHint = args[0];
         // 同 fetch：归属以「发出请求时」的播放器为准
         const atRequest = ownerVideoId(win);
         this.addEventListener('load', () => {
+          // 同 fetch：错误响应不是字幕（status 0 是测试桩/未设，不拦）
+          if (this.status && (this.status < 200 || this.status >= 300)) return;
           try {
             const text = this.responseType === 'json' ? JSON.stringify(this.response) : this.responseText;
             if (typeof text === 'string') record(url, text, kind, bodyHint, atRequest);

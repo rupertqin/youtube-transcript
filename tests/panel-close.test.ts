@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { closeTranscriptPanelVerified, isTranscriptPanelExpanded } from '../src/core/dom/panel';
+import {
+  closeTranscriptPanelIfOurs,
+  closeTranscriptPanelVerified,
+  isTranscriptPanelExpanded,
+  transcriptPanelOpenedByUs,
+} from '../src/core/dom/panel';
 
 /**
  * 「原生字幕显示了不会消失」的根因：关闭是同步点一下就返回，
@@ -40,8 +45,17 @@ class FakePanel {
   }
 }
 
-function makeDoc(panel: FakePanel | null): Document {
+function makeDoc(panel: FakePanel | null, attrs: Record<string, string> = {}): Document {
   return {
+    documentElement: {
+      getAttribute: (name: string) => attrs[name] ?? null,
+      setAttribute: (name: string, value: string) => {
+        attrs[name] = value;
+      },
+      removeAttribute: (name: string) => {
+        delete attrs[name];
+      },
+    },
     querySelectorAll: (selector: string) =>
       selector === '*' ? [] : selector.includes('engagement-panel') && panel ? [panel] : [],
     querySelector: () => null,
@@ -102,5 +116,28 @@ describe('closeTranscriptPanelVerified', () => {
 
   it('没有面板可关时直接成功，且不抛错', async () => {
     await expect(closeTranscriptPanelVerified(makeDoc(null))).resolves.toBe(true);
+  });
+});
+
+describe('closeTranscriptPanelIfOurs：只收自己点开的面板', () => {
+  it('用户自己开的面板一次都不点（点了屏幕上就是「字幕框闪一下」）', async () => {
+    const panel = new FakePanel();
+    const ok = await closeTranscriptPanelIfOurs(makeDoc(panel));
+
+    expect(ok).toBe(false);
+    expect(panel.clicks).toBe(0);
+    expect(panel.visibility).toBe('EXPANDED');
+  });
+
+  it('我们点开的面板照常收起，收完清掉标记', async () => {
+    const panel = new FakePanel();
+    const attrs: Record<string, string> = { 'data-ytt-panel-opened': '1' };
+    const doc = makeDoc(panel, attrs);
+
+    const ok = await closeTranscriptPanelIfOurs(doc);
+
+    expect(ok).toBe(true);
+    expect(panel.clicks).toBe(1);
+    expect(transcriptPanelOpenedByUs(doc)).toBe(false);
   });
 });

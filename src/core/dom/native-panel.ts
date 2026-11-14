@@ -1,6 +1,8 @@
 import type { TranscriptLine } from '../types';
 import { readPlayerVideoId } from '../harvest/player';
+import { pickPanel } from './panel';
 import { deepElements } from './shadow';
+import { sleep } from './wait';
 import { parseTimecode, parseTimecodeRows } from './text-rows';
 import { formatTimestamp } from '../format/export';
 import { contentSignature } from '../format/fingerprint';
@@ -238,4 +240,83 @@ export async function extractFromNativePanel(
   options: NativePanelOptions = {},
 ): Promise<NativePanelResult> {
   return readDomPreview(doc, options);
+}
+
+/** 找面板自己的滚动容器；只滚它，绝不碰页面滚动条。 */
+function findPanelScroller(doc: Document): HTMLElement | null {
+  const roots: Element[] = [];
+  const panel = pickPanel(doc);
+  if (panel) roots.push(panel);
+  let node: Element | null = panel;
+  for (let up = 0; node?.parentElement && up < 6; up += 1) {
+    node = node.parentElement;
+    roots.push(node);
+  }
+  for (const root of roots) {
+    for (const el of [root, ...Array.from(root.querySelectorAll('*'))]) {
+      const html = el as HTMLElement;
+      if (
+        typeof html.scrollHeight === 'number' &&
+        typeof html.clientHeight === 'number' &&
+        html.clientHeight > 40 &&
+        html.scrollHeight > html.clientHeight + 8
+      ) {
+        return html;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * DOM 兜底：把**已经渲染出来**的字幕读全。
+ *
+ * 虚拟列表只渲染视口附近的行，同步读一次常常只剩播放位置那一段 ——
+ * 真实案例（JW5s9Md4U2U 的姊妹视频）只读到 1:58 之后的 43 行，前面整段都漏了，
+ * 而原生面板从 0:00 开始一屏屏滚下来是全的。
+ *
+ * 这里在面板**自己的滚动容器**里从头滚到底，每一屏的行按时间码并起来去重；
+ * 滚完把 `scrollTop` 还原。次数有上限，滚不到底就用手头攒到的这些。
+ * 它仍然是兜底：`complete: false`，不进缓存。
+ */
+export async function readRenderedTranscript(
+  doc: Document,
+  options: NativePanelOptions = {},
+): Promise<NativePanelResult> {
+  const first = readDomPreview(doc, options);
+  const scroller = findPanelScroller(doc);
+  if (first.lines.length === 0 || !scroller) return first;
+
+  const collected = new Map<number, TranscriptLine>();
+  const absorb = (rows: readonly Row[]): void => {
+    for (const row of rows) {
+      if (row.start >= 0 && !collected.has(row.start)) {
+        collected.set(row.start, { start: row.start, dur: 0, text: row.text });
+      }
+    }
+  };
+  absorb(first.lines.map((line) => ({ start: line.start, text: line.text })));
+
+  const restoreTop = scroller.scrollTop;
+  let passes = 0;
+  try {
+    scroller.scrollTop = 0;
+    for (let pass = 0; pass < 12; pass += 1) {
+      // 虚拟列表要等浏览器渲染，同步连读只会拿到同一屏
+      await sleep(120);
+      passes += 1;
+      const text = snapshotTranscriptText(doc, { quick: true });
+      if (text) absorb(pickRows(text));
+      const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 4;
+      if (atBottom) break;
+      scroller.scrollTop = scroller.scrollTop + Math.max(120, Math.floor(scroller.clientHeight * 0.8));
+    }
+  } finally {
+    scroller.scrollTop = restoreTop;
+  }
+
+  const merged = [...collected.values()].sort((a, b) => a.start - b.start);
+  if (merged.length <= first.lines.length) return first;
+  lastDiagnostic = `DOM 兜底: 滚 ${passes} 屏，${first.lines.length} → ${merged.length} 行（按时间码去重）`;
+  return { lines: merged, showTimestamps: true };
 }

@@ -14,7 +14,7 @@ import {
   readVideoDuration,
   readVideoId,
 } from '../core/harvest/player';
-import { closeTranscriptPanelVerified } from '../core/dom/panel';
+import { closeTranscriptPanelIfOurs } from '../core/dom/panel';
 
 /** 每一层兜底对应的用户可读提示（面板加载态里显示）。 */
 const STAGE_TEXT: Record<'player' | 'innertube' | 'intercept' | 'dom' | 'panel', string> = {
@@ -392,7 +392,9 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
       switchPending = true;
       // 异步确认式收起：点一下经常赶不上 YouTube 的 DOM 更新，
       // 旧版本因此把面板留在页面上（用户看到的「原生字幕不会消失」）。
-      void closeTranscriptPanelVerified(win.document).then((closed) => {
+      // 只收**我们自己点开**的：用户手动开的那个去点关闭，屏幕上就是「字幕框闪一下」。
+      // 旧面板的内容由 staleRisk（内容指纹闸门）挡着，不靠关面板来保证归属。
+      void closeTranscriptPanelIfOurs(win.document).then((closed) => {
         if (closed) {
           log({ code: 'UNKNOWN', source: 'dom', detail: `已收起 ${current.videoId} 残留的原生字幕面板` });
         }

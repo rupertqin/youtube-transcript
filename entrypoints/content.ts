@@ -1,6 +1,6 @@
 import { ensureEntryButton, flashEntryButton, removeEntryButton } from '../src/core/dom/button';
-import { readDomPreview } from '../src/core/dom/native-panel';
-import { closeTranscriptPanelVerified } from '../src/core/dom/panel';
+import { readDomPreview, readRenderedTranscript } from '../src/core/dom/native-panel';
+import { closeTranscriptPanelIfOurs, ensureFreshTranscriptRequest } from '../src/core/dom/panel';
 import { sleep } from '../src/core/dom/wait';
 import { harvestTranscript } from '../src/core/harvest/chain';
 import {
@@ -9,7 +9,7 @@ import {
   readTitleFor,
   readVideoId,
 } from '../src/core/harvest/player';
-import { pickUsableChoice, resolveLangPlan } from '../src/core/langs';
+import { langMatches, pickUsableChoice, resolveLangPlan } from '../src/core/langs';
 import { log } from '../src/core/log';
 import type { SourceOutcome } from '../src/core/types';
 import { createBridgeEndpoint } from '../src/platform/bridge';
@@ -91,6 +91,34 @@ export default defineContentScript({
           const plan = langPlan();
           // 没有目标语言的原生轨道时，拦截层 / DOM 层只能给原文 —— 让远程先上
           const needsTranslation = Boolean(plan.tlang) && !hasNativeTrackFor(window, plan.tlang!);
+
+          const domOptions = () => ({
+            videoId,
+            skipSnapshot: options?.staleRisk,
+            avoidSignature: options?.avoid ?? null,
+          });
+          // 页面已渲染的字幕：先当临时预览，所有完整源都失败时再当兜底（不进缓存）
+          const readRendered = (): SourceOutcome | null => {
+            const result = readDomPreview(document, domOptions());
+            if (result.lines.length === 0) return null;
+            return {
+              lines: result.lines,
+              source: 'dom',
+              showTimestamps: result.showTimestamps,
+              complete: false,
+            };
+          };
+          // 兜底要读全：在面板自己的滚动容器里从头滚到底，攒齐所有行
+          const readRenderedFull = async (): Promise<SourceOutcome | null> => {
+            const result = await readRenderedTranscript(document, domOptions());
+            if (result.lines.length === 0) return null;
+            return {
+              lines: result.lines,
+              source: 'dom',
+              showTimestamps: result.showTimestamps,
+              complete: false,
+            };
+          };
           return harvestTranscript({
             signal,
             log,
@@ -118,6 +146,10 @@ export default defineContentScript({
               : undefined,
             intercept: bridgeUp
               ? async (timeoutMs) => {
+                  // 同油猴端：CC 关着时播放器不发 timedtext，
+                  // 但原生面板的 get_transcript 与 CC 无关 —— 面板已开着时收起再点开，
+                  // 逼它重新请求（POST 不会被缓存），截到的是完整响应。
+                  await ensureFreshTranscriptRequest(document, { timeoutMs: 1_200 }).catch(() => null);
                   const payload = await bridge.request<RemotePayload | null>(
                     'WAIT_TIMEDTEXT',
                     { videoId, timeoutMs, tlang: langPlan().tlang },
@@ -129,32 +161,33 @@ export default defineContentScript({
             // 主路径：MAIN world 里直接问 get_transcript，一次拿回全部分段
             structured: bridgeUp
               ? async () => {
-                  if (plan.tlang) return null; // 要翻译时不能拿原文顶替
+                  // 同油猴端：不因为选了目标语言就跳过主路径，
+                  // 拿到结果再按语言过滤（要翻译时只认目标语言的原生轨道）。
                   const payload = await bridge.request<RemotePayload | null>(
                     'GET_TRANSCRIPT',
                     { videoId, langs: plan.langs },
                     8000,
                   );
-                  return toOutcome(payload);
+                  const outcome = toOutcome(payload);
+                  if (!outcome) return null;
+                  // 语言码为空时不要判成「语言不符」，完整结果优先
+                  if (
+                    needsTranslation &&
+                    outcome.track?.languageCode &&
+                    !langMatches(outcome.track.languageCode, plan.tlang)
+                  ) {
+                    return null;
+                  }
+                  return outcome;
                 }
               : undefined,
             // 同步预览：一次可见文本扫描，不点击、不等待、不滚动
-            domPreview: () => {
-              const result = readDomPreview(document, {
-                videoId,
-                skipSnapshot: options?.staleRisk,
-                avoidSignature: options?.avoid ?? null,
-              });
-              if (result.lines.length === 0) return null;
-              return {
-                lines: result.lines,
-                source: 'dom',
-                showTimestamps: result.showTimestamps,
-                complete: false,
-              };
-            },
+            domPreview: readRendered,
+            // 所有完整源都失败时退到它：页面已经渲染出字幕，就别报「没有字幕轨道」。
+            // 这条要滚一屏屏读全，否则会漏前段（虚拟列表只渲染视口附近的行）。
+            domFallback: readRenderedFull,
             onPreview: options?.onPreview,
-            closePanel: () => closeTranscriptPanelVerified(document),
+            closePanel: () => closeTranscriptPanelIfOurs(document),
           });
         },
       },

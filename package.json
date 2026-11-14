@@ -1,7 +1,7 @@
 {
   "name": "youtube-transcript",
   "private": true,
-  "version": "2.26.0",
+  "version": "2.29.3",
   "type": "module",
   "description": "YouTube transcript workbench for Chrome (MV3) and Tampermonkey, sharing one core.",
   "scripts": {

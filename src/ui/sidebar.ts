@@ -114,6 +114,7 @@ export function createSidebarPanel(options: SidebarPanelOptions): SidebarPanelHa
   let panel: PanelHandle | null = null;
   let open = readOpen();
   let watchTimer = 0;
+  let observer: MutationObserver | null = null;
   /** 上一轮轮询时地址栏的视频，用来发现「页面换了视频」 */
   let lastPageId: string | null = null;
 
@@ -259,6 +260,18 @@ export function createSidebarPanel(options: SidebarPanelOptions): SidebarPanelHa
   function startWatch(): void {
     if (watchTimer || !win) return;
     lastPageId = currentVideoId();
+
+    // YouTube 重建右栏时会把我们的宿主一起摘掉。只靠 600ms 轮询的话，
+    // 卡片会在页面上消失半秒再长回来 —— 用户看到的就是「闪一下」。
+    // 这里用 MutationObserver：摘掉后**下一个任务就补挂**，只剩一帧空窗。
+    const Observer = (win as Window & typeof globalThis).MutationObserver;
+    if (Observer && !observer && doc.documentElement) {
+      observer = new Observer(() => {
+        if (open && (!host || !host.isConnected)) ensureMounted();
+      });
+      observer.observe(doc.documentElement, { childList: true, subtree: true });
+    }
+
     watchTimer = win.setInterval(() => {
       if (!open) return;
 
@@ -292,6 +305,8 @@ export function createSidebarPanel(options: SidebarPanelOptions): SidebarPanelHa
     destroy() {
       if (watchTimer && win) win.clearInterval(watchTimer);
       watchTimer = 0;
+      observer?.disconnect();
+      observer = null;
       panel?.destroy();
       panel = null;
       host?.remove();

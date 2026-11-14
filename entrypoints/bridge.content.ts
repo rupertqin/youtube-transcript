@@ -1,5 +1,5 @@
 import { installShadowCapture } from '../src/core/dom/shadow';
-import { fetchGetTranscript } from '../src/core/harvest/get-transcript';
+import { fetchPanelTranscript } from '../src/core/harvest/get-panel';
 import { installTimedTextHook } from '../src/core/harvest/intercept';
 import { linesFromCapture } from '../src/core/harvest/sources';
 import { runRemoteSources } from '../src/core/harvest/sources';
@@ -47,20 +47,21 @@ export default defineContentScript({
       // 主路径必须快：结构化源排在最前，卡住会拖慢整条链
       const timer = setTimeout(() => controller.abort(), 8_000);
       try {
-        const outcome = await fetchGetTranscript({
+        // 就直接问 get_panel：2026 面板唯一的数据源，一次请求拿全部分段
+        const outcome = await fetchPanelTranscript({
           win: window,
           fetchFn: window.fetch.bind(window),
           videoId,
-          langs: payload?.langs ?? ['zh-Hans', 'zh', 'en'],
           signal: controller.signal,
           timeoutMs: 6_000,
-          maxAttempts: 10,
         });
         if (!outcome) return null;
         return {
           lines: outcome.lines,
           source: 'innertube',
-          track: { baseUrl: `get_transcript:${outcome.params}`, languageCode: outcome.lang },
+          track: outcome.lang
+            ? { baseUrl: `structured:${videoId}`, languageCode: outcome.lang }
+            : undefined,
           showTimestamps: true,
           failures: [],
           complete: true,
@@ -110,11 +111,27 @@ export default defineContentScript({
 
       // 要的是另一种语言，但捕获到的是原声轨道：这一层给不了翻译结果，
       // 放行就会「切成中文显示英文」且状态是 ready，用户看不出问题。
+      // **只在语言码确实读到了且不符时才丢弃**：get_transcript 的 lang 读不到时是 null，
+      // 一见 tlang 就整条丢掉完整响应，结果永远只能退到 DOM 读虚拟列表那一屏。
       const tlang = payload?.tlang ?? null;
-      if (tlang && !langMatches(capture.lang, tlang)) return null;
+      if (tlang && capture.lang && !langMatches(capture.lang, tlang)) return null;
 
       const lines = linesFromCapture(capture);
-      if (lines.length === 0) return null;
+      if (lines.length === 0) {
+        return {
+          lines: [],
+          source: 'intercept',
+          showTimestamps: true,
+          failures: [
+            {
+              source: 'intercept',
+              code: 'EMPTY_200',
+              ms: 0,
+              detail: `截到了 ${capture.kind} 响应（${capture.text.length} 字符）但解析出 0 行`,
+            },
+          ],
+        };
+      }
 
       return {
         lines,

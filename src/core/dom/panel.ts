@@ -10,6 +10,34 @@ export function getTriggerInfo(): string {
   return triggerInfo;
 }
 
+/** 标记「这个原生面板是我们点开的」（记在 documentElement 上，切页自然失效）。 */
+const OURS_ATTR = 'data-ytt-panel-opened';
+
+function markOurs(doc: Document): void {
+  try {
+    doc.documentElement?.setAttribute(OURS_ATTR, '1');
+  } catch {
+    /* 文档不可写（极少） */
+  }
+}
+
+function clearOurs(doc: Document): void {
+  try {
+    doc.documentElement?.removeAttribute(OURS_ATTR);
+  } catch {
+    /* 同上 */
+  }
+}
+
+/** 页面上开着的原生字幕面板是不是我们自己点开的。 */
+export function transcriptPanelOpenedByUs(doc: Document): boolean {
+  try {
+    return doc.documentElement?.getAttribute(OURS_ATTR) === '1';
+  } catch {
+    return false;
+  }
+}
+
 /** 简介默认是折叠的，「Show transcript」按钮可能藏在里面；先点一下展开。 */
 async function expandDescription(doc: Document): Promise<boolean> {
   const expander =
@@ -184,6 +212,8 @@ export async function openTranscriptPanel(
   };
 
   if (!(await clickOpen())) return panel ?? null;
+  // 点了才记：只有我们点开的面板，才允许我们收（用户自己点开的一概不动）
+  markOurs(doc);
 
   const deadline = Date.now() + timeoutMs;
   let tabClicked = false;
@@ -200,6 +230,27 @@ export async function openTranscriptPanel(
     await sleep(150);
   }
   return panel ?? null;
+}
+
+/**
+ * 逼 YouTube 重新发一次 `get_transcript` 请求。
+ *
+ * 面板已经开着时，那一次请求早就发过了，hook 抓不到；而虚拟列表只渲染
+ * 视口附近的行（真实案例：只读到 1:58 之后的 43 行，前面整段都漏了）。
+ * 收起再点开一次，页面就会重新请求 —— **POST 不会被浏览器缓存**，
+ * hook 截下来的响应里是**全部分段**，不是那几十行。
+ *
+ * 用的还是 YouTube 自己的按钮：只点 `Show transcript` 与它自己的关闭按钮。
+ */
+export async function ensureFreshTranscriptRequest(
+  doc: Document,
+  options: { waitMs?: number; timeoutMs?: number } = {},
+): Promise<Element | null> {
+  if (isTranscriptPanelExpanded(doc) || pickPanel(doc)) {
+    triggerInfo = '面板已开着：收起再点开，逼它重新请求';
+    await closeTranscriptPanelVerified(doc);
+  }
+  return openTranscriptPanel(doc, options);
 }
 
 /**
@@ -303,8 +354,22 @@ export async function closeTranscriptPanelVerified(doc: Document): Promise<boole
       closeTranscriptPanel(doc, pickPanel(doc));
       await sleep(220);
     }
-    return !isTranscriptPanelExpanded(doc);
+    const closed = !isTranscriptPanelExpanded(doc);
+    if (closed) clearOurs(doc);
+    return closed;
   } catch {
     return false;
   }
+}
+
+/**
+ * 只收**我们自己点开**的原生字幕面板。
+ *
+ * 用户自己点开「显示字幕记录」时，切页 / 抓取结束去点它的关闭按钮，
+ * 屏幕上就是明显的「字幕框闪一下」（展开 → 被收掉）。既然不是我们开的，
+ * 就不要动它 —— 归属判断由内容指纹闸门（`staleRisk`）负责，不靠关面板。
+ */
+export async function closeTranscriptPanelIfOurs(doc: Document): Promise<boolean> {
+  if (!transcriptPanelOpenedByUs(doc)) return false;
+  return closeTranscriptPanelVerified(doc);
 }

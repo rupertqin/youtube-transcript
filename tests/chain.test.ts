@@ -208,3 +208,80 @@ describe('抓取兜底链（完整结构化源优先，DOM 只做同步预览）
     ).rejects.toBeInstanceOf(HarvestError);
   });
 });
+
+/**
+ * 最糟的失败形态：面板里明明渲染着字幕，我们却报「这个视频没有字幕轨道」。
+ * 真实案例（JW5s9Md4U2U）：结构化源 400 Precondition check failed、
+ * timedtext 空 body、InnerTube 探不到轨道，而 DOM 里躺着 376 行。
+ */
+describe('所有完整源都失败时的 DOM 兜底', () => {
+  const everythingFails = () => ({
+    structured: async () => {
+      throw new Error('HTTP 400 Precondition check failed');
+    },
+    intercept: async () => null,
+    remote: async () => null,
+  });
+
+  it('页面已渲染的字幕会作为兜底返回，且标记为不完整', async () => {
+    const result = await harvestTranscript(
+      makeDeps({
+        ...everythingFails(),
+        domPreview: () => outcome('dom', 2),
+        domFallback: () => outcome('dom', 376),
+      }),
+    );
+
+    expect(result.source).toBe('dom');
+    expect(result.lines).toHaveLength(376);
+    // 关键：不完整 → session 不会写缓存，下次还会重新抓完整版
+    expect(result.complete).toBe(false);
+  });
+
+  it('兜底也不为空时才用；它没内容就照旧报错', async () => {
+    await expect(
+      harvestTranscript(
+        makeDeps({
+          ...everythingFails(),
+          domPreview: () => null,
+          domFallback: () => null,
+        }),
+      ),
+    ).rejects.toBeInstanceOf(HarvestError);
+  });
+
+  it('完整源成功时不会走兜底', async () => {
+    const domFallback = vi.fn(() => outcome('dom', 376));
+    const result = await harvestTranscript(
+      makeDeps({
+        structured: async () => outcome('innertube'),
+        domPreview: () => outcome('dom', 2),
+        domFallback,
+      }),
+    );
+
+    expect(result.source).toBe('innertube');
+    expect(result.complete).toBe(true);
+    expect(domFallback).not.toHaveBeenCalled();
+  });
+});
+
+describe('全部失败时的错误码', () => {
+  it('主路径的真实错误优先于末层探测的 NO_CAPTION_TRACK', async () => {
+    await expect(
+      harvestTranscript(
+        makeDeps({
+          structured: async () => {
+            throw new Error('HTTP 400 Precondition check failed');
+          },
+          remote: async () => ({
+            lines: [],
+            source: 'innertube',
+            showTimestamps: true,
+            failures: [{ source: 'innertube', code: 'NO_CAPTION_TRACK', ms: 1, detail: 'no track' }],
+          }),
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'NETWORK_ERROR' });
+  });
+});

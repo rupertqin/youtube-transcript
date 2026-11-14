@@ -1,18 +1,19 @@
 import panelCss from '../src/ui/styles.css?inline';
 import { ensureEntryButton, flashEntryButton, removeEntryButton } from '../src/core/dom/button';
-import { readDomPreview } from '../src/core/dom/native-panel';
-import { closeTranscriptPanelVerified } from '../src/core/dom/panel';
+import { readDomPreview, readRenderedTranscript } from '../src/core/dom/native-panel';
+import { closeTranscriptPanelIfOurs, ensureFreshTranscriptRequest } from '../src/core/dom/panel';
 import { installShadowCapture } from '../src/core/dom/shadow';
 import { harvestTranscript } from '../src/core/harvest/chain';
-import { fetchGetTranscript } from '../src/core/harvest/get-transcript';
+import { fetchPanelTranscript } from '../src/core/harvest/get-panel';
 import { installTimedTextHook } from '../src/core/harvest/intercept';
 import { hasNativeTrackFor, readAvailableLangs, readTitleFor, readVideoId } from '../src/core/harvest/player';
 import { runInterceptSource, runRemoteSources } from '../src/core/harvest/sources';
-import { pickUsableChoice, resolveLangPlan } from '../src/core/langs';
+import { langMatches, pickUsableChoice, resolveLangPlan } from '../src/core/langs';
 import { log } from '../src/core/log';
 import { createLocalClient } from '../src/platform/local-client';
 import { createSession } from '../src/platform/session';
 import { getPrefs } from '../src/ui/prefs';
+import type { SourceOutcome } from '../src/core/types';
 import { createSidebarPanel } from '../src/ui/sidebar';
 
 /**
@@ -47,6 +48,34 @@ import { createSidebarPanel } from '../src/ui/sidebar';
         const needsTranslation = Boolean(plan.tlang) && !hasNativeTrackFor(win, plan.tlang!);
         const ctx = { videoId, langs: plan.langs, tlang: plan.tlang, signal, log };
 
+        const domOptions = () => ({
+          videoId,
+          skipSnapshot: options?.staleRisk,
+          avoidSignature: options?.avoid ?? null,
+        });
+        // 页面已渲染的字幕：先当临时预览，所有完整源都失败时再当兜底（不进缓存）
+        const readRendered = (): SourceOutcome | null => {
+          const result = readDomPreview(document, domOptions());
+          if (result.lines.length === 0) return null;
+          return {
+            lines: result.lines,
+            source: 'dom',
+            showTimestamps: result.showTimestamps,
+            complete: false,
+          };
+        };
+        // 兜底要读全：在面板自己的滚动容器里从头滚到底，攒齐所有行
+        const readRenderedFull = async (): Promise<SourceOutcome | null> => {
+          const result = await readRenderedTranscript(document, domOptions());
+          if (result.lines.length === 0) return null;
+          return {
+            lines: result.lines,
+            source: 'dom',
+            showTimestamps: result.showTimestamps,
+            complete: false,
+          };
+        };
+
         return harvestTranscript({
           signal,
           log,
@@ -54,46 +83,44 @@ import { createSidebarPanel } from '../src/ui/sidebar';
           preferRemote: needsTranslation,
           remote: () => runRemoteSources({ win, ctx }),
           cachedIntercept: () => runInterceptSource(ctx, hook, 0),
-          // 主路径：一次 get_transcript 拿回全部分段，不碰虚拟列表
+          // 主路径：一次 get_panel 拿回全部分段，不碰虚拟列表
           structured: async () => {
-            if (plan.tlang) return null; // 要翻译时不能拿原文顶替
-            const outcome = await fetchGetTranscript({
+            // 不再因为「选了目标语言」就整条跳过：视频本身有该语言轨道时，
+            // 这条路既快又完整。拿到结果再按语言过滤（要翻译时只认目标语言）。
+            const outcome = await fetchPanelTranscript({
               win,
               fetchFn: win.fetch.bind(win),
               videoId,
-              langs: plan.langs,
               signal,
               timeoutMs: 6_000,
-              maxAttempts: 10,
             });
             if (!outcome || outcome.lines.length === 0) return null;
+            // 语言码为空（page-params 那一路拿不到）时不要判成「语言不符」，完整结果优先
+            if (needsTranslation && outcome.lang && !langMatches(outcome.lang, plan.tlang)) return null;
             return {
               lines: outcome.lines,
               source: 'innertube',
-              track: { baseUrl: `get_transcript:${outcome.params}`, languageCode: outcome.lang },
+              track: outcome.lang
+                ? { baseUrl: `structured:${videoId}`, languageCode: outcome.lang }
+                : undefined,
               showTimestamps: true,
               complete: true,
             };
           },
           // 只是让屏幕上先有字：一次同步扫描，不点击、不等待、不滚动
-          domPreview: () => {
-            const result = readDomPreview(document, {
-              videoId,
-              skipSnapshot: options?.staleRisk,
-              avoidSignature: options?.avoid ?? null,
-            });
-            if (result.lines.length === 0) return null;
-            return {
-              lines: result.lines,
-              source: 'dom',
-              showTimestamps: result.showTimestamps,
-              complete: false,
-            };
-          },
+          domPreview: readRendered,
+          // 兜底要读全：虚拟列表只渲染视口附近的行，同步读一次会漏前段
+          domFallback: readRenderedFull,
           onPreview: options?.onPreview,
-          intercept: (timeoutMs) => runInterceptSource(ctx, hook, timeoutMs),
-          // 页面上残留的原生面板，抓取结束一律验证式收起
-          closePanel: () => closeTranscriptPanelVerified(document),
+          // CC 关着时播放器根本不发 timedtext（这一层就没东西可截）；
+          // 但原生面板走的是 get_panel，和 CC 无关 —— 逼它重新发一次请求，
+          // hook 截下来的是**完整响应**（不是虚拟列表那几十行），抓完由 finally 收起。
+          intercept: async (timeoutMs) => {
+            await ensureFreshTranscriptRequest(document, { timeoutMs: 1_200 }).catch(() => null);
+            return runInterceptSource(ctx, hook, timeoutMs);
+          },
+          // 只收我们自己点开的面板：用户手动开的不动（否则会看到「字幕框闪一下」）
+          closePanel: () => closeTranscriptPanelIfOurs(document),
         });
       },
     },
@@ -128,10 +155,10 @@ import { createSidebarPanel } from '../src/ui/sidebar';
     });
   };
 
-  // 用户手动点开 YouTube 的 Transcript 标签页时，页面会自己发 get_transcript。
+  // 用户手动点开 YouTube 的 Transcript 标签页时，页面会自己发 get_panel。
   // 截获后立刻自动重载，不需要再点「重试」。
   hook.onCapture((capture) => {
-    if (capture.kind !== 'get_transcript') return;
+    if (capture.kind !== 'get_panel' && capture.kind !== 'get_transcript') return;
     if (session.store.getState().status !== 'error') return;
     void session.load(true);
   });

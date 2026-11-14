@@ -53,6 +53,29 @@ export interface PanelOptions {
   currentVideoId?: () => string | null;
 }
 
+/**
+ * 切页窗口期：列表里的旧行**留着**（半透明 + 切换提示）还是照常清空。
+ *
+ * 以前的实现是一律清空成骨架卡片，等新数据到了再重建 —— 用户看到的就是
+ * 「字幕框闪一下」。现在只有同时满足下面三条才保留旧行：
+ *   ① 确实换了视频（状态属于别的 id，或 state 换了 id）；
+ *   ② 还在取（loading / idle）；
+ *   ③ 列表里真的有行可留（空列表留个空壳没有意义，直接给骨架）。
+ *
+ * `error` 明确返回 false：失败时必须走正常渲染，把旧行清掉并显示错误卡片。
+ */
+export function keepsRowsWhileSwitching(input: {
+  stale: boolean;
+  status: PanelState['status'];
+  listCount: number;
+  stateVideoId: string;
+  shownVideoId: string;
+}): boolean {
+  if (input.listCount === 0) return false;
+  if (input.status !== 'loading' && input.status !== 'idle') return false;
+  return input.stale || input.stateVideoId !== input.shownVideoId;
+}
+
 export interface PanelHandle {
   element: HTMLElement;
   relayout(): void;
@@ -85,6 +108,11 @@ export function createPanel(options: PanelOptions): PanelHandle {
   /** 面板状态是否属于「别的视频」——为真时一律不渲染旧内容 */
   let staleNow = false;
   let staleKey = '';
+  /** 正在切页但新字幕还没到：列表保持原样，只加一层「切换中」提示 */
+  let switchingNow = false;
+  let switchingShown = false;
+  /** 列表里现在这些行属于哪个视频（用来判断「换视频了」而不看 updatedAt） */
+  let shownVideoId = '';
 
   /**
    * 实际生效的视图：偏好是 chapters 但这个视频没有章节时回退到字幕，
@@ -169,6 +197,36 @@ export function createPanel(options: PanelOptions): PanelHandle {
   );
 
   const main = h('main', { class: 'relative min-h-0 flex-1' }, [listHost, emptyHost]);
+
+  /**
+   * 切页时的「保留旧行 + 半透明」提示。
+   *
+   * 以前这里会把列表整个清空（setCount(0)）换成骨架卡片，新数据到了再重建，
+   * 用户看到的就是「字幕框闪一下」。现在旧行原地不动、只降透明度：
+   * 新字幕到达时虚拟列表只重画可见的那十几行，视觉上没有空窗。
+   */
+  const switchingHost = h(
+    'div',
+    { class: 'pointer-events-none absolute inset-x-0 top-5 z-10 flex justify-center' },
+    [
+      h('div', {
+        class: 'rounded-full bg-[var(--ytt-surface-2)] px-3 py-1 text-[12px] text-[var(--ytt-text-dim)]',
+        text: '正在切换到新视频…',
+      }),
+    ],
+  );
+  switchingHost.style.display = 'none';
+  main.appendChild(switchingHost);
+
+  function setSwitching(on: boolean): void {
+    switchingNow = on;
+    if (on === switchingShown) return;
+    switchingShown = on;
+    show(switchingHost, on);
+    // 旧行降透明度 + 暂时不可点：既看得出「不是新视频的内容」，也不会误点走
+    listHost.classList.toggle('opacity-40', on);
+    listHost.classList.toggle('pointer-events-none', on);
+  }
 
   /* ---------------- status ---------------- */
   const statusBar = createStatusBar({
@@ -312,8 +370,15 @@ export function createPanel(options: PanelOptions): PanelHandle {
   }
 
   function renderEmpty(): void {
-    if (staleNow) {
-      // 闸门生效：列表整体退场，只留一个「切换中」骨架
+    if (switchingNow) {
+      // 切换中：列表里还有上一个视频的行就留着（半透明 + 顶部提示），
+      // 绝不清空重建 —— 那一下就是用户看到的「闪」。
+      if (listCount > 0) {
+        show(listHost, true);
+        show(emptyHost, false);
+        return;
+      }
+      // 本来就是空的（首帧/刚打开）：这时候给骨架没有副作用
       show(listHost, false);
       show(emptyHost, true);
       const key = `stale|${staleKey}`;
@@ -374,20 +439,24 @@ export function createPanel(options: PanelOptions): PanelHandle {
     staleNow = isStalePanelState(state.videoId, pageId);
     staleKey = staleNow ? `${pageId}|${state.videoId}` : '';
 
-    header.setTitle(staleNow ? '正在切换到新视频…' : state.title || 'Transcript Studio');
-    header.setSubtitle(staleNow ? '同步中…' : subtitleText());
+    // 「换视频了但新字幕还没到」：保留列表里的旧行，只加一层切换提示。
+    // 判据看 videoId 而不是 updatedAt —— 后者每次改状态都会变，会把普通重画也当成切页。
+    // 只有 loading/idle 才算「正在取」；error 要正常走下面（把旧行清掉、显示错误卡片）。
+    setSwitching(
+      keepsRowsWhileSwitching({
+        stale: staleNow,
+        status: state.status,
+        listCount,
+        stateVideoId: state.videoId,
+        shownVideoId,
+      }),
+    );
+
+    header.setTitle(switchingNow ? '正在切换到新视频…' : state.title || 'Transcript Studio');
+    header.setSubtitle(switchingNow ? '同步中…' : subtitleText());
     statusBar.update(state, pageId);
 
-    if (staleNow) {
-      const gateKey = `stale|${staleKey}`;
-      if (gateKey !== listKey) {
-        listKey = gateKey;
-        indexMap = [];
-        positions = [];
-        listCount = 0;
-        list.setCount(0);
-        lastActive = -1;
-      }
+    if (switchingNow) {
       renderToolbar();
       renderEmpty();
       return;
@@ -402,6 +471,8 @@ export function createPanel(options: PanelOptions): PanelHandle {
       `|${currentView()}|${state.chapters.length}|${storyboardKey}`;
     if (key !== listKey) {
       listKey = key;
+      // 这次列表里的行属于当前 state 的视频了，切页提示可以撤掉
+      shownVideoId = state.videoId;
       rebuildIndex();
       // 时间戳开关 / 视图切换时行数往往不变，setCount 会直接返回、行不重建。
       // 行数没变就走 refresh()，保证开关立刻反映到 UI 上。

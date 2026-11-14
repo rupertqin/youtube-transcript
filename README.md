@@ -199,18 +199,105 @@ src/ui/                      面板组件（双端同一份，原生 DOM）
 | ⓪（仅要翻译时） | `remote`          | `preferRemote`：远程层是唯一能产出目标语言的层，先问它，避免「切中文显示英文」                                                               |
 | ⓪.5             | `cachedIntercept` | 此前已截获的完整 `get_transcript` / `timedtext` 响应，0ms 命中                                                                               |
 | ①               | `domPreview`      | 同步预览，**不短路**：只让屏幕上先有字，`complete: false`                                                                                    |
-| ②               | `structured`      | 主路径：直接构造 InnerTube `get_transcript` 请求，一次拿回**全部分段**与精确 `startMs/endMs`。页面自带 params 优先；带 6s 上限与尝试次数上限 |
-| ③               | `intercept`       | 等 YouTube 自己发出的字幕响应（短等 2.5s）                                                                                                   |
+| ②               | `structured`      | 主路径：直接构造 InnerTube `get_panel` 请求，**一次**拿回**全部分段**与精确 `startMs/endMs`。页面自带 params 优先，失败才用自己拼的那条（最多两次请求）；带 6s 上限 |
+| ③               | `intercept`       | 逼原生面板发一次 `get_transcript` 请求，hook 截**完整响应**（短等 2.5s）。**不依赖 CC**：面板已开着时收起再点开，强制重新请求 |
 | ④               | `remote`          | `playerResponse.captionTracks` → `/youtubei/v1/player` 降级探测                                                                              |
+| ⑤（兜底）        | `domFallback`     | 以上全失败时，把页面**已经渲染出来**的字幕当结果返回，`complete: false`（**不进缓存**）；会在面板自己的滚动容器里滚到底，把每一屏的行按时间码并起来 |
 
-`get_transcript` 就是 YouTube 原生字幕面板的数据源：它一次返回全部分段，
+> **2026 年面板的数据源是 `get_panel`，而且只有它。**
+> `panelId = PAmodern_transcript_view`，`params` 是 protobuf `{149: {1: videoId, 3: 1}}`
+> （真实请求 `qgkPCgtIWXJSWUNTUnhkRRgB` 反推而来，有逐字回归测试锁住）。
+> 以前的 `get_transcript` 直连已经整个删掉：那个端点对我们的请求只回
+> `400 Precondition check failed`，留着它只是白刷请求。
+>
+> **URL 不带 `?key=`。** 原生成功的那条请求是
+> `POST /youtubei/v1/get_panel?prettyPrint=false`，靠页面 cookie 认证；
+> 带上项目 key 反而会被内塔顶回 400（网络面板里带 key 的全红，不带 key 的才成功）。
+>
+> **只发一次。** 用页面自己的 `INNERTUBE_CONTEXT`（`X-Youtube-Client-Name: 1` +
+> 页面 `clientVersion` + visitorData + `SAPISIDHASH`），不再遍历
+> ANDROID / TVHTML5 / 各种 params 编码变体。params 一律用
+> `buildGetPanelParams()`（`{149:{1:videoId,3:1}}`）。
+>
+> 页面里那份 `getTranscriptEndpoint.params` **不要用**：实测同视频同 panelId，
+> 自拼 → 200 / 116 KB / 85 段；页面那份 → 200 / 960 字节 / 0 段（只有
+> `responseContext`）。它是给「可搜索字幕面板」用的，形状不同。
+> 先试它再试自拼的，就是「两次请求，一次空一次满」的来源。
+>
+> **登录态。** 成功那条真实请求带的是
+> `Authorization: SAPISIDHASH <ts>_<sha1(ts + ' ' + SAPISID + ' ' + origin)>`
+> （外加 `SAPISID1PHASH` / `SAPISID3PHASH` 两个变体，分别用
+> `__Secure-1PAPISID` / `__Secure-3PAPISID`）以及
+> `X-Youtube-Bootstrap-Logged-In` / `X-Goog-AuthUser`。
+> `authHeaders()` 从 `document.cookie` 里的 SAPISID 系列算出这个头；
+> 没登录就退回匿名请求，不硬塞空头。
+
+`get_panel` 就是 YouTube 原生字幕面板的数据源：它一次返回全部分段，
 不依赖虚拟列表渲染了多少行，也不依赖播放器就绪。所以主路径既**快**又**完整**，
 最坏等待从「12s 等播放器 + 10s 等切页 + 12 轮轮询 + 60 屏滚动」收敛为
-「一次短网络请求 + 一次线性合并」。所有完整源都失败时进入错误态并清空预览，
-绝不把缺前段的内容当成成功结果。
+「一次短网络请求 + 一次线性合并」。
 
-> **不再主动打开原生面板**。常规路径完全不点 `Show transcript`，因此页面上不会
-> 因为我们多出一块 YouTube 字幕面板。若页面上残留着旧版本留下（或用户自己点开）的面板，
+**最糟的失败形态是「面板里明明渲染着字幕，我们却报没有字幕轨道」**，所以加了第 ⑤ 层：
+真实案例（`JW5s9Md4U2U`）里结构化源回 `400 Precondition check failed`、timedtext 空 body、
+InnerTube 探不到轨道，而页面上躺着 376 行完整字幕。现在这种情形会把那 376 行给你，
+只是标记 `complete: false` —— 不写缓存（命中缓存时也不会二次合并），下次仍重新抓完整版；
+底栏「诊断」的 **完整性** 一行会写明「不完整（页面已渲染文本兜底，未缓存）」。
+
+> **漏前段的真正根因：拦截层把完整响应整条丢了。**
+> `get_transcript` 的 URL 上没有 `lang=` 参数，于是 `capture.lang` **恒为 null**；
+> 拦截层一见「用户选了目标语言」就判成「捕获的是未知语言，不是要的 xx」，
+> 把一次能拿全**全部分段**的响应丢掉，永远只能退到 DOM 兜底 ——
+> 而字幕列表是虚拟列表，只渲染视口附近的行，前面整段读不到。
+> 现在语言码从 `params` 的两层 protobuf 里读出来（内层 field 3），
+> 并且**只在语言确实读到了且不符时**才丢弃；读不到就放行，完整响应优先。
+>
+> 另外两道兜底都不碰 CC：
+> ① `ensureFreshTranscriptRequest()`：面板已开着时那一次请求早就发过了，hook 抓不到。
+> 收起再点开一次，页面必须重新请求（POST 不会被浏览器缓存）；
+> ② `readRenderedTranscript()`：真退到 DOM 时，在面板**自己的**滚动容器里从头滚到底
+> （有上限，滚完还原 `scrollTop`），每一屏的行按时间码去重合并。
+>
+> **自己的请求不能污染捕获缓存**。hook 补的是全局 `window.fetch`，我们直连
+> `get_transcript` 的请求也会被截下来 —— 失败时截到的是 119 字符的 400 错误体，
+> 它把缓存污染成「已有一条 get_transcript 响应」，拦截层 0ms 命中垃圾、解析出 0 行，
+> 真正的面板响应反而等不到。现在自己的请求打 `SELF_FETCH` 标记不截，
+> 错误响应（`ok === false`）也不截。诊断里的 `截到了 get_transcript 响应（119 字符）
+> 但解析出 0 行` 就是这条污染留下的痕迹。
+>
+> 还有一处会让「截到了却没用上」：`parseGetTranscript()` 以前只认
+> `transcriptSegmentRenderer`，而 YouTube 正把 `*Renderer` 迁移成 `*ViewModel`
+> （`transcriptSegmentViewModel`）。认不出新名字就解析出 0 行，链路里记成
+> `拦截 no lines`，看起来像「没截到」。现在解析器**形状无关**：任何键名带
+> `segment`、有时间戳和文字的节点都算一条，文字从 `snippet`/`content`/`runs`
+> 里递归取。诊断也把两种情况分开了：`截到了 get_transcript 响应（N 字符）但解析出 0 行`
+> 与「压根没截到」是两回事。
+
+> 顺带修了两处会把诊断带偏的地方：
+> ① `get_transcript` 请求现在带上 `X-Youtube-Client-Name` / `X-Youtube-Client-Version` /
+> `X-Goog-Visitor-Id` 三个头 —— 少了它们 YouTube 直接回 `400 Precondition check failed`
+> （那不是参数错，参数错是另一种消息）；
+> ② 全部失败时的错误码优先取主路径的真实原因，不再被末层探测的 `NO_CAPTION_TRACK`
+> 盖成「这个视频没有字幕轨道」。
+
+> **CC 开关与抓取无关，我们也不去动它**。这本来就是两条完全不同的数据通路：
+>
+> | 通路 | 端点 | 依赖 CC 吗 |
+> | --- | --- | --- |
+> | 播放器字幕轨 | `/api/timedtext` | **是** —— 只有选中某条字幕轨才会请求 |
+> | 原生字幕面板 | `/youtubei/v1/get_transcript` | **否** —— 只按 videoId 取 |
+>
+> 所以「CC 关着 → 抓不到，CC 一开 → 立刻有」不是能力限制，而是我们**选错了触发源**：
+> 兜底链里那一层「截获播放器自己发的 timedtext」在 CC 关闭时无内容可截。
+> 面板走的是 `get_transcript`，CC 关着照样有字幕 —— 这就是原生框一直能用的原因。
+>
+> 现在拦截层在等待前先 `openTranscriptPanel(document, { timeoutMs: 1200 })`：
+> 点开面板**只为逼出那条 `get_transcript` 请求**；hook 截下来的是**完整响应**
+> （不是虚拟列表渲染出的几十行），所以不需要滚动，也不会缺前段。
+> 抓完由 `chain.ts` 的 `finally` 调 `closeTranscriptPanelVerified()` 收起。
+> **全程不碰 CC**，不会出现「插件字幕 + YouTube 自带字幕」重复。
+
+> **面板的开合策略**。`structured`（直连 `get_transcript`，完全不点任何东西）永远是第一步；
+> 只有它失败时才点开面板逼请求。若页面上残留着旧版本留下（或用户自己点开）的面板，
 > `chain.ts` 的 `finally` 会 `await closeTranscriptPanelVerified(document)`：
 > 「点一下 → 等 220ms → 再看是否仍展开」，最多三轮，确实收起了才算完成。
 > 只点 YouTube 自己的按钮，不隐藏/移除它的节点。
@@ -297,7 +384,7 @@ availableLangs = 原生 captionTracks 的语言      ← 只有这个
 几个配套细节：
 
 - 切语言会**强制重抓**（`load(true)`）并先清空旧行，不会让你盯着英文界面以为切失败；
-- **要翻译时必须让远程层先上**。被动拦截层、结构化源和 DOM 预览只能给视频原文，如果先命中就会出现「切回中文却显示英文」而状态还是 ready。所以 `harvestTranscript` 收到 `preferRemote` 时会先把远程层提上来，同时拦截层也会拒绝语言不符的捕获（`capture.lang !== tlang`），结构化源在 `plan.tlang` 存在时直接跳过（不拿原文顶替）；
+- **要翻译时必须让远程层先上**。被动拦截层、结构化源和 DOM 预览只能给视频原文，如果先命中就会出现「切回中文却显示英文」而状态还是 ready。所以 `harvestTranscript` 收到 `preferRemote` 时会先把远程层提上来，拦截层会拒绝语言不符的捕获（`capture.lang !== tlang`）；结构化源**照常执行**，只在 `needsTranslation`（视频确实没有目标语言轨道）时用 `langMatches` 过滤掉原文结果 —— 不再因为「选了目标语言」就整条跳过主路径；
 - 缓存按语言分开存（`cacheKey` 里含语言），读的时候也按目标语言过滤，所以「切中文」不会命中上次的英文；
 - 拦截层（`get_transcript`）和结构化源拿到的永远是**视频原声语言**，没法翻译。这两层命中时，底栏显示的语言徽标会是实际语言（例如 `EN`），和按钮上的选择不一致就说明「这条视频没有你要的语言，显示的是原文」。
 

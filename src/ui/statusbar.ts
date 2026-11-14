@@ -121,6 +121,16 @@ export function createStatusBar(options: StatusBarOptions = {}): StatusBarHandle
       popover.appendChild(row('句子合并', `${raw} → ${merged} 行`));
     }
 
+    // 不完整 = 来自页面已渲染文本的兜底，可能缺前段，且不会写进缓存
+    if (state.lines.length > 0) {
+      popover.appendChild(
+        row(
+          '完整性',
+          state.complete ? '完整（可缓存，7 天内复用）' : '不完整（页面已渲染文本兜底，未缓存）',
+        ),
+      );
+    }
+
     if (mismatch) {
       popover.insertBefore(
         h('p', {
