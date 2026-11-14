@@ -54,6 +54,7 @@ export function emptyPanelState(videoId = ''): PanelState {
     availableLangs: [],
     cached: false,
     complete: true,
+    mergeStats: null,
     failures: [],
     error: null,
     activeIndex: -1,

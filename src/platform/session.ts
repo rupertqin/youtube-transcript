@@ -161,6 +161,7 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
       status: 'ready',
       lines: displayLines,
       complete: result.complete !== false,
+      mergeStats: { raw: lines.length, merged: displayLines.length },
       chapters,
       storyboard,
       showTimestamps: result.showTimestamps,
@@ -238,12 +239,15 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
 
       if (cached) {
         const storyboard = await loadStoryboard(videoId);
+        const rawLines = cleanLines(cached.lines);
+        const displayLines = mergeFragments(rawLines);
         store.setState({
           videoId,
           title: cached.title || hooks.title(videoId),
           status: 'ready',
-          lines: mergeFragments(cleanLines(cached.lines)),
+          lines: displayLines,
           complete: true,
+          mergeStats: { raw: rawLines.length, merged: displayLines.length },
           chapters:
             cached.chapters && cached.chapters.length > 0
               ? cached.chapters
@@ -274,6 +278,7 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
       cached: false,
       failures: [],
       progress: '准备抓取…',
+      mergeStats: null,
       title: hooks.title(videoId),
       // 强制重抓通常意味着「换了语言」：旧行是另一种语言，留着只会误导
       ...(force ? { lines: [] as PanelState['lines'], activeIndex: -1 } : {}),
@@ -282,8 +287,11 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
     // 预览只在这条视频仍属于本次抓取时才允许写进 state
     const showPreview = (raw: TranscriptLine[]): void => {
       if (signal.aborted || run !== inflight || store.getState().videoId !== videoId) return;
+      const cleaned = cleanLines(raw);
+      const displayLines = mergeFragments(cleaned);
       store.setState({
-        lines: mergeFragments(cleanLines(raw)),
+        lines: displayLines,
+        mergeStats: { raw: cleaned.length, merged: displayLines.length },
         status: 'loading',
         progress: '已读到页面字幕，正在取完整内容…',
         source: 'dom',
@@ -320,6 +328,7 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
         failures,
         lines: [],
         complete: true,
+        mergeStats: null,
         source: null,
         // 抓取失败时章节仍可用：它是页面上的独立数据，不依赖字幕请求
         chapters: readChaptersIfCurrent(videoId),

@@ -5,14 +5,22 @@ import { mergeFragments } from '../src/core/lines';
 import type { TranscriptLine } from '../src/core/types';
 
 /**
- * YouTube 原生面板显示的不是原始 ASR 分段：它把连续几段合成一条，
- * 只在段落开头留一个时间码。我们把 get_transcript 的每个 segment 单独渲染，
- * 于是同一份数据显得「特别散」。这里测的就是补上的那一步。
+ * YouTube 原生面板显示的不是原始分段：它把连续几段合成一条，只在行首留一个
+ * 时间码。我们把 get_transcript 的每个 segment 单独渲染，于是同一份数据「特别散」。
+ *
+ * 分组判据只能来自数据本身。手头有的信号：
+ * - 开始时间（有）；
+ * - 结束时间（不可靠，`endMs` 常缺失或盖过下一段）→ 算不出停顿；
+ * - 句末标点（大多数碎片没有）→ 没法按句子切。
+ *
+ * 剩下的稳定信号是**时间跨度**，这也正是原生面板的做法：同一份数据里
+ * 原生面板每一条覆盖 7–8 秒（0:00→0:08 两段、0:08→0:15 四段、0:20→0:28 两段），
+ * 字符数从 20 到 149 完全不固定。所以这里一行攒满约 8 秒就换行。
  */
 
 const line = (start: number, text: string, dur = 1_800): TranscriptLine => ({ start, dur, text });
 
-describe('mergeFragments：把 ASR 碎片拼成可读句子', () => {
+describe('mergeFragments：一行约 8 秒', () => {
   it('连续的短分段合成一行，保留首段 start', () => {
     const rows = [
       line(0, 'Welcome to The Daily Show.'),
@@ -40,13 +48,43 @@ describe('mergeFragments：把 ASR 碎片拼成可读句子', () => {
     expect(srt).toContain('First fragment. Second fragment.');
   });
 
-  it('长停顿（>8s）切开，不会把隔了半分钟的两句话粘成一条', () => {
-    const rows = [line(0, 'Opening line.', 1_000), line(20_000, 'After a long pause.', 1_000)];
+  it('跨度到 8 秒就换行，与原生面板的分组一致', () => {
+    const texts = [
+      'Welcome to The Daily Show.',
+      'Let me tell you something.',
+      "I am so excited that you've joined us tonight.",
+      'My name is Jon Stewart.',
+      'Unbelievable show for you tonight.',
+      'Rachel Maddow is going to be joining us later.',
+      '[CHEERING, APPLAUSE]',
+      'Jon Stewart and Rachel Maddow, liberal wet dream.',
+      'I dreamed, I dreamed about this.',
+    ];
+    const starts = [0, 6_000, 8_000, 10_000, 11_000, 13_000, 15_000, 20_000, 26_000];
+    const rows = starts.map((start, i) => line(start, texts[i]));
+
+    const merged = mergeFragments(rows);
+
+    // 原生面板：0:00 两段、0:08 四段、0:15 音效、0:20 两段
+    expect(merged.map((l) => l.start)).toEqual([0, 8_000, 15_000, 20_000]);
+    expect(merged[0].text).toBe(texts.slice(0, 2).join(' '));
+    expect(merged[1].text).toBe(texts.slice(2, 6).join(' '));
+    expect(merged[2].text).toBe('[CHEERING, APPLAUSE]');
+    expect(merged[3].text).toBe(texts.slice(7, 9).join(' '));
+  });
+
+  it('章节之间隔几分钟：跨度判据自然把行断开', () => {
+    const rows = [
+      line(0, '第一章第一句。'),
+      line(2_000, '第一章第二句。'),
+      line(300_000, '第二章第一句。'),
+    ];
 
     const merged = mergeFragments(rows);
 
     expect(merged).toHaveLength(2);
-    expect(merged[1].start).toBe(20_000);
+    expect(merged[0].text).toBe('第一章第一句。第一章第二句。');
+    expect(merged[1].start).toBe(300_000);
   });
 
   it('[音效/舞台提示] 独立成行，且不与前后台词合并', () => {
@@ -69,33 +107,25 @@ describe('mergeFragments：把 ASR 碎片拼成可读句子', () => {
     expect(mergeFragments([line(0, '中文'), line(2_000, 'and English')])[0].text).toBe('中文and English');
   });
 
-  it('超长或跨度过大时停止合并，避免滚成一整块', () => {
-    const rows = [line(0, 'A'.repeat(90)), line(2_000, 'B'.repeat(90)), line(4_000, 'C'.repeat(90))];
+  it('时间码异常（多段挤在同一秒）时用字数兜底，不滚成一整块', () => {
+    // 跨度永远是 0，只有字数上限能拦住
+    const rows = Array.from({ length: 8 }, (_, i) => line(0, `segment ${i} ${'x'.repeat(40)}`));
 
     const merged = mergeFragments(rows);
-    expect(merged.length).toBe(3);
 
-    const wide = mergeFragments([line(0, 'first'), line(11_000, 'second')], { maxSpanMs: 10_000 });
-    expect(wide).toHaveLength(2);
+    expect(merged.length).toBeGreaterThan(1);
+    for (const row of merged) {
+      expect(row.text.length).toBeLessThanOrEqual(240);
+    }
   });
 
-  it('没有时间码的行不参与合并；空数组直接返回空', () => {
+  it('没有时间码的行单独成行；空数组返回空', () => {
     const rows = [
       { start: -1, dur: 0, text: '无时间码' },
       { start: -1, dur: 0, text: '另一行' },
     ];
     expect(mergeFragments(rows)).toHaveLength(2);
     expect(mergeFragments([])).toEqual([]);
-  });
-
-  it('保持时间顺序，不修改入参', () => {
-    const rows = [line(0, 'first'), line(2_000, 'second')];
-    const merged = mergeFragments(rows);
-
-    expect(merged[0].start).toBe(0);
-    expect(merged[0].dur).toBeGreaterThan(rows[0].dur);
-    expect(rows[0].text).toBe('first');
-    expect(rows[1].text).toBe('second');
   });
 
   it('清洗只做文本归一化、不合并：缓存里存的是原始分段', () => {
@@ -120,4 +150,45 @@ describe('mergeFragments：把 ASR 碎片拼成可读句子', () => {
     expect(cleaned[0].text).toBe('正文');
     expect(cleaned).toHaveLength(2);
   });
+});
+
+/**
+ * 分组只看 `start`，与 `dur` 完全无关。
+ * 真实数据里 `endMs` / `dDurationMs` 有重叠、超长、缺失三种形态，
+ * 分组必须一模一样，否则同一份字幕在不同来源下会长得不一样。
+ */
+describe('mergeFragments：分组不随 dur 形态变化', () => {
+  const texts = [
+    'Welcome to The Daily Show.',
+    'Let me tell you something.',
+    "I am so excited that you've joined us tonight.",
+    'My name is Jon Stewart.',
+    'Unbelievable show for you tonight.',
+    'Rachel Maddow is going to be joining us later.',
+    '[CHEERING, APPLAUSE]',
+    'Jon Stewart and Rachel Maddow, liberal wet dream.',
+    'I dreamed, I dreamed about this.',
+  ];
+  const starts = [0, 6_000, 8_000, 10_000, 11_000, 13_000, 15_000, 20_000, 26_000];
+
+  const shapes: [string, (i: number) => number][] = [
+    ['endMs 恰好等于下一段起点', (i) => (i < starts.length - 1 ? starts[i + 1] - starts[i] : 2_000)],
+    ['endMs 重叠到下一段之后', (i) => (i < starts.length - 1 ? starts[i + 1] - starts[i] + 1_500 : 3_500)],
+    ['timedtext 的超长 dDurationMs', () => 6_000],
+    ['dur 全部缺失（0）', () => 0],
+  ];
+
+  for (const [label, durOf] of shapes) {
+    it(`${label}：9 段分组完全一致`, () => {
+      const merged = mergeFragments(
+        starts.map((start, i) => ({ start, dur: durOf(i), text: texts[i] })),
+      );
+
+      expect(merged.map((l) => l.start)).toEqual([0, 8_000, 15_000, 20_000]);
+      expect(merged[0].text).toBe(texts.slice(0, 2).join(' '));
+      expect(merged[1].text).toBe(texts.slice(2, 6).join(' '));
+      // SRT 用的 dur 至少覆盖到组内最后一段
+      expect(merged[0].dur).toBeGreaterThan(6_000);
+    });
+  }
 });

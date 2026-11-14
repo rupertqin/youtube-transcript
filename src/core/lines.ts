@@ -104,32 +104,39 @@ export function looksLikeTranscript(lines: TranscriptLine[]): boolean {
 /* ---------------- 句子级合并 ---------------- */
 
 /**
- * 把 2–4 秒的 ASR 碎片拼成可读的段落。
+ * 把 2–4 秒的 ASR 碎片拼成可读的行。
  *
- * YouTube 原生面板显示的不是原始分段：它把连续若干段合成一条，只在段落开头
- * 留一个时间码。我们一直把 `get_transcript` 返回的每个 `transcriptSegmentRenderer`
- * 单独渲染成一行，于是同一份数据看起来「特别散」，行数甚至是原生的 4–5 倍。
+ * 数据里只有**开始时间**：`endMs` / `dDurationMs` 常缺失或盖过下一段（算不出停顿），
+ * 碎片大多数也不带句末标点（没法按句子切）。剩下的稳定信号只有一个 —— **时间跨度**。
  *
- * 合并判据按原生面板的实际形态取值：
- * - 相邻间隔 ≤ 8s（台词之间的停顿；章节之间隔几分钟，自然切开）
- * - 合并后 ≤ 140 字符、跨度 ≤ 12s（避免滚成一整块）
- * - `[CHEERING, APPLAUSE]` 这种音效/舞台提示独立成行
- * - 中文边界不补空格，英文边界补一个空格
+ * 这也正是 YouTube 原生面板的做法。同一份数据里原生面板的每一条：
+ * 0:00→0:08（两段）、0:08→0:15（四段）、0:20→0:28（两段），
+ * 字符数从 20 到 149 完全不固定，**跨度却稳定在 7–8 秒**，只在行首留一个时间码。
+ * 所以这里用同一个粒度：**一行攒满约 8 秒就换行**。
  *
- * 保留首段 `start`（点击跳转、播放高亮都靠它），并把 `dur` 重算成
- * 「末段结束 − 首段开始」—— SRT 导出用 `dur` 算结束时间，缺了会缩到第一段。
+ * 跨度只用 `start`（本段起点 − 行首起点），不依赖结束时间 ——
+ * 这是「停顿」之外唯一能算的东西，而且和原生面板的分组一致。
+ *
+ * 其它规则：
+ * - `[CHEERING, APPLAUSE]` 这类音效/舞台提示独立成行，前后都断开
+ * - 章节之间隔几分钟，跨度判据会自然把行断开，不用额外处理
+ * - 中文边界不加空格，英文边界补一个空格
+ * - 时间码异常（多段挤在同一秒）时用字数上限兜底，不至于滚成一整块
+ * - 保留首段 `start`（点击跳转 / 播放高亮靠它）；`dur` 取到末段结束，
+ *   异常超长的单段时长截到 4s，避免 SRT 结束时间串到下一段
  * O(n) 单次遍历。
  */
-const MERGE_MAX_CHARS = 140;
-const MERGE_MAX_SPAN_MS = 12_000;
-const MERGE_MAX_GAP_MS = 8_000;
+/** 一行覆盖的时间跨度上限（与原生面板 7–8 秒的粒度一致） */
+const MERGE_MAX_SPAN_MS = 8_000;
+/** 兜底：时间码异常（多段同一秒）时不至于无限变长 */
+const MERGE_MAX_CHARS = 240;
+
 const SOUND_CUE_RE = /^\[[^\]]{1,40}\]$/u;
 const CJK_RE = /[\u3400-\u9fff\u3040-\u30ff\uf900-\ufaff]/u;
 
 export interface MergeOptions {
-  maxChars?: number;
   maxSpanMs?: number;
-  maxGapMs?: number;
+  maxChars?: number;
 }
 
 /** 拼接两段正文：中文之间不留空格，英文之间补一个。 */
@@ -146,40 +153,64 @@ export function mergeFragments(
   lines: readonly TranscriptLine[],
   options: MergeOptions = {},
 ): TranscriptLine[] {
-  const maxChars = options.maxChars ?? MERGE_MAX_CHARS;
   const maxSpanMs = options.maxSpanMs ?? MERGE_MAX_SPAN_MS;
-  const maxGapMs = options.maxGapMs ?? MERGE_MAX_GAP_MS;
+  const maxChars = options.maxChars ?? MERGE_MAX_CHARS;
 
   const out: TranscriptLine[] = [];
+  /** 当前候选行的原始片段：片段不再切开，切了就没有对应的时间点 */
+  let buf: TranscriptLine[] = [];
+  let bufText = '';
+
+  const emit = (items: readonly TranscriptLine[], text: string): void => {
+    if (items.length === 0) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    const dur =
+      items.length === 1
+        ? first.dur
+        : Math.max(first.dur, last.start + Math.min(Math.max(last.dur, 1_500), 4_000) - first.start);
+    out.push({ start: first.start, dur, text: text.trim() });
+  };
+
+  const flush = (): void => {
+    emit(buf, bufText);
+    buf = [];
+    bufText = '';
+  };
+
   for (const line of lines) {
     const cur: TranscriptLine = { ...line };
-    const prev = out[out.length - 1];
+    const trimmed = cur.text.trim();
+    if (!trimmed) continue;
 
-    // 没有时间码、或音效提示：不参与合并
-    if (
-      !prev ||
-      prev.start < 0 ||
-      cur.start < 0 ||
-      SOUND_CUE_RE.test(prev.text.trim()) ||
-      SOUND_CUE_RE.test(cur.text.trim())
-    ) {
+    // 音效/舞台提示：独立成行，前后都断开
+    if (SOUND_CUE_RE.test(trimmed)) {
+      flush();
+      out.push({ start: cur.start, dur: cur.dur, text: trimmed });
+      continue;
+    }
+
+    // 没有时间码的行无法定位，单独成行
+    if (cur.start < 0) {
+      flush();
       out.push(cur);
       continue;
     }
 
-    const prevEnd = prev.start + Math.max(prev.dur, 0);
-    const gap = cur.start - prevEnd;
-    const combined = joinText(prev.text, cur.text);
-    const span = cur.start + Math.max(cur.dur, 0) - prev.start;
-
-    if (gap >= 0 && gap <= maxGapMs && combined.length <= maxChars && span <= maxSpanMs) {
-      prev.text = combined;
-      // dur 未知时按 1.5s 估算，保证 SRT 的结束时间至少覆盖末段
-      const tail = cur.start + (cur.dur > 0 ? cur.dur : 1_500) - prev.start;
-      prev.dur = Math.max(prev.dur, tail);
+    // 跨度从行首算起：攒满约 8 秒就换行（与原生面板一致）。
+    // 字数上限只是兜底，防时间码异常（多段挤在同一秒）时滚成一整块。
+    const span = buf.length === 0 ? 0 : cur.start - buf[0].start;
+    const fitsChars = bufText.length + 1 + trimmed.length <= maxChars;
+    if (buf.length > 0 && span < maxSpanMs && fitsChars) {
+      buf.push(cur);
+      bufText = joinText(bufText, trimmed);
       continue;
     }
-    out.push(cur);
+
+    flush();
+    buf = [cur];
+    bufText = trimmed;
   }
+  flush();
   return out;
 }

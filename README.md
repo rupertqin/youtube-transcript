@@ -2,8 +2,6 @@
 
 一个常驻的 YouTube 字幕工作台，同时产出 **Chrome MV3 扩展** 与 **Tampermonkey 脚本**，两端共享同一套核心代码与 UI。
 
-![show](./show.png)
-
 - 页面标题栏出现 `Transcript` 入口，点开是**嵌进观看页右栏的卡片**（相关视频上方，随页面滚动，不遮挡视频）；无右栏的页面只给按钮提示。扩展仍可用工具栏开 Side Panel
 - 切到另一个视频时面板不关，自动换成当前视频的字幕与章节；不会残留上一个视频的内容（判据是**内容指纹**，见下文「切页」）
 - 标题栏第二行只在**抓取中**（显示当前阶段）和**抓取失败**时出现；抓成功后整行隐藏 —— 来源与行数底栏已经写了，不再重复
@@ -13,7 +11,7 @@
 - 排版学 YouTube 原生面板：`Roboto, Arial, sans-serif`、正文 **14px / 行高 24px**；时间戳**单独占一行**（12px 灰、在正文上方），左右各 20px 留白，块与块之间约 22px
 - 复制全文，或导出 `txt` / `md` / `srt` / `json`
 - 完整结构化字幕源优先的抓取兜底链 + 失败分类，抓一次缓存 7 天
-- ASR 碎片按句子合并成段落（和 YouTube 原生面板一样的粒度），显示 / 搜索 / 复制 / 导出共用同一份
+- ASR 碎片按「约 8 秒一行」合并成段落（与 YouTube 原生面板分组一致），显示 / 搜索 / 复制 / 导出共用同一份
 
 ## 一个产物，一个入口
 
@@ -27,14 +25,14 @@
 >
 > 能力去向：
 
-| 原版能力 | 现在的实现 |
-| --- | --- |
-| `openTranscriptPanel` / `pickPanel` / `countSegments` | `src/core/dom/panel.ts` |
-| `extractTranscript` / `collectFromList` | `src/core/dom/scrape.ts` |
-| `extractFallback`（按时间码切 `innerText`） | `src/core/dom/text-rows.ts` |
-| `stripA11yDuration`（无障碍时长清洗） | `src/core/format/a11y.ts` |
-| `parseChapters` / `readChapterRows` | `src/core/format/chapters.ts` |
-| `formatCopyText` | `src/core/format/copy.ts` |
+| 原版能力                                              | 现在的实现                    |
+| ----------------------------------------------------- | ----------------------------- |
+| `openTranscriptPanel` / `pickPanel` / `countSegments` | `src/core/dom/panel.ts`       |
+| `extractTranscript` / `collectFromList`               | `src/core/dom/scrape.ts`      |
+| `extractFallback`（按时间码切 `innerText`）           | `src/core/dom/text-rows.ts`   |
+| `stripA11yDuration`（无障碍时长清洗）                 | `src/core/format/a11y.ts`     |
+| `parseChapters` / `readChapterRows`                   | `src/core/format/chapters.ts` |
+| `formatCopyText`                                      | `src/core/format/copy.ts`     |
 
 产物因此少了约 7 kB（userscript 112 kB → 105 kB），构建也不再需要前置同步脚本。
 
@@ -77,7 +75,6 @@
   搜索、播放高亮全部跟着换数据源。当前视频没有章节时自动回退到字幕视图
 - **点击时间点**：`TranscriptLine.start` 是毫秒，`video.currentTime` 是秒，
   `row.ts` 里换算后再 seek（之前直接传毫秒，`1:05` 会跳到 65000 秒）
-
 
 ### 章节截图 / 高亮 / 开关即时生效
 
@@ -148,7 +145,7 @@ npm run build:ext
 npm run build:userscript
 ```
 
-把 `dist/userscript/youtube-transcript.user.js` 拖进 Tampermonkey 的安装页（或直接打开该文件）。脚本 `@grant none`，本身运行在页面上下文，不需要任何 GM_ API。
+把 `dist/userscript/youtube-transcript.user.js` 拖进 Tampermonkey 的安装页（或直接打开该文件）。脚本 `@grant none`，本身运行在页面上下文，不需要任何 GM\_ API。
 
 ## 开发
 
@@ -197,14 +194,14 @@ src/ui/                      面板组件（双端同一份，原生 DOM）
 
 **完整结构化源优先，DOM 只做同步预览**。任一层拿到非空行即短路返回：
 
-| 顺序 | 层 | 说明 |
-| --- | --- | --- |
-| ⓪（仅要翻译时） | `remote` | `preferRemote`：远程层是唯一能产出目标语言的层，先问它，避免「切中文显示英文」 |
-| ⓪.5 | `cachedIntercept` | 此前已截获的完整 `get_transcript` / `timedtext` 响应，0ms 命中 |
-| ① | `domPreview` | 同步预览，**不短路**：只让屏幕上先有字，`complete: false` |
-| ② | `structured` | 主路径：直接构造 InnerTube `get_transcript` 请求，一次拿回**全部分段**与精确 `startMs/endMs`。页面自带 params 优先；带 6s 上限与尝试次数上限 |
-| ③ | `intercept` | 等 YouTube 自己发出的字幕响应（短等 2.5s） |
-| ④ | `remote` | `playerResponse.captionTracks` → `/youtubei/v1/player` 降级探测 |
+| 顺序            | 层                | 说明                                                                                                                                         |
+| --------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| ⓪（仅要翻译时） | `remote`          | `preferRemote`：远程层是唯一能产出目标语言的层，先问它，避免「切中文显示英文」                                                               |
+| ⓪.5             | `cachedIntercept` | 此前已截获的完整 `get_transcript` / `timedtext` 响应，0ms 命中                                                                               |
+| ①               | `domPreview`      | 同步预览，**不短路**：只让屏幕上先有字，`complete: false`                                                                                    |
+| ②               | `structured`      | 主路径：直接构造 InnerTube `get_transcript` 请求，一次拿回**全部分段**与精确 `startMs/endMs`。页面自带 params 优先；带 6s 上限与尝试次数上限 |
+| ③               | `intercept`       | 等 YouTube 自己发出的字幕响应（短等 2.5s）                                                                                                   |
+| ④               | `remote`          | `playerResponse.captionTracks` → `/youtubei/v1/player` 降级探测                                                                              |
 
 `get_transcript` 就是 YouTube 原生字幕面板的数据源：它一次返回全部分段，
 不依赖虚拟列表渲染了多少行，也不依赖播放器就绪。所以主路径既**快**又**完整**，
@@ -228,22 +225,22 @@ src/ui/                      面板组件（双端同一份，原生 DOM）
 
 标题直接来自 `document.title`，与抓取链无关。标题也停在旧视频，只能是「面板状态从未切换」。
 
-| 环节 | 现象 | 现在怎么做 |
-| --- | --- | --- |
-| 一次异常就永久失效 | `tick()` 先 `lastUrl = location.href` 再干活；`sidebar.ensureMounted()` 抛一次异常就跳过本次 `sync()`，而 URL 已被记成「处理过」，之后每次 tick 都在第一行 return | `lastUrl` 挪到**全部干完之后**才更新；每步独立 `try/catch` |
-| 只靠事件驱动 | `session.sync()` 只在被调用时推进，漏一次就永久错 | 新增 **500ms `reconcile()` 自愈循环**（`session.start()`）：只比对「地址栏 ?v=」与「store.videoId」，不一致就 abort + 清空 + 重抓；回调整体 `try/catch`，异常绝不外溢 |
-| 宿主重建后面板不重挂 | `ensurePanel()` 见到 `panel` 就 return，新 shadow root 是空的，面板还留在旧的（已脱离）root 里 | 判定 `panel.element.parentNode !== shadowRoot` 就重新 append 并 `relayout()`；同时清理重复的 `#ytt-sidebar-host` |
-| 标题可能来自旧玩家响应 | `readTitle` 只读 `document.title` | `readTitleFor(win, videoId)`：`playerResponse.videoDetails.videoId` 对得上才用它，否则退回 `document.title` |
+| 环节                   | 现象                                                                                                                                                              | 现在怎么做                                                                                                                                                            |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 一次异常就永久失效     | `tick()` 先 `lastUrl = location.href` 再干活；`sidebar.ensureMounted()` 抛一次异常就跳过本次 `sync()`，而 URL 已被记成「处理过」，之后每次 tick 都在第一行 return | `lastUrl` 挪到**全部干完之后**才更新；每步独立 `try/catch`                                                                                                            |
+| 只靠事件驱动           | `session.sync()` 只在被调用时推进，漏一次就永久错                                                                                                                 | 新增 **500ms `reconcile()` 自愈循环**（`session.start()`）：只比对「地址栏 ?v=」与「store.videoId」，不一致就 abort + 清空 + 重抓；回调整体 `try/catch`，异常绝不外溢 |
+| 宿主重建后面板不重挂   | `ensurePanel()` 见到 `panel` 就 return，新 shadow root 是空的，面板还留在旧的（已脱离）root 里                                                                    | 判定 `panel.element.parentNode !== shadowRoot` 就重新 append 并 `relayout()`；同时清理重复的 `#ytt-sidebar-host`                                                      |
+| 标题可能来自旧玩家响应 | `readTitle` 只读 `document.title`                                                                                                                                 | `readTitleFor(win, videoId)`：`playerResponse.videoDetails.videoId` 对得上才用它，否则退回 `document.title`                                                           |
 
 #### 二、状态换了但内容来自旧视频
 
-| 环节 | 现象 | 现在怎么做 |
-| --- | --- | --- |
-| 地址栏先变、播放器后变 | 播放器还停在旧视频，DOM 里仍是旧字幕行 | `readDomPreview()` 里的 `staleVideoNote(doc, videoId)` 直接放弃预览；完整结果来自结构化源，不依赖播放器就绪 |
-| **原生面板不销毁** | YouTube 切页不会关掉展开着的字幕面板，里面还是上一个视频的行；**这些行没有任何 videoId 标记** | ①`reconcile()` 里 `closeTranscriptPanelVerified()` 验证式收起（最多三轮）；②切页那一刻记下**旧内容指纹**（`contentSignature`），预览前比对，与上一条完全一致就丢弃 |
-| 预览没有归属信息 | `snapshotTranscriptText` 只认文字，不认是谁的 | `readDomPreview(doc, { videoId, skipSnapshot, avoidSignature })` 三道闸门一起判；而且预览**不进缓存、不当最终结果**，最坏也只闪一下就被完整字幕覆盖 |
-| 播放器响应滞后 | `playerResponse` 还挂着上一个视频，用它取 `captionTracks` 会拉到**上一页**的 timedtext；storyboard 同理 | `sources.ts` 校验 `playerResponse.videoDetails.videoId`，不匹配就不取轨道（改走 innertube 探测）；`readStoryboardSpec(win, videoId)` 同样校验 |
-| 拦截层归属错标 | `get_transcript` 的 videoId 用地址栏猜，切页时会把旧视频的响应当成新视频 | 先读 **POST body 的 base64(protobuf) `params`**（`0x0a 0x0b <11 字节 id>`），读不到再退**请求发出那一刻的播放器 id**，最后才是地址栏；归属为 `null` 的捕获不命中任何 `waitFor` |
+| 环节                   | 现象                                                                                                    | 现在怎么做                                                                                                                                                                     |
+| ---------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 地址栏先变、播放器后变 | 播放器还停在旧视频，DOM 里仍是旧字幕行                                                                  | `readDomPreview()` 里的 `staleVideoNote(doc, videoId)` 直接放弃预览；完整结果来自结构化源，不依赖播放器就绪                                                                    |
+| **原生面板不销毁**     | YouTube 切页不会关掉展开着的字幕面板，里面还是上一个视频的行；**这些行没有任何 videoId 标记**           | ①`reconcile()` 里 `closeTranscriptPanelVerified()` 验证式收起（最多三轮）；②切页那一刻记下**旧内容指纹**（`contentSignature`），预览前比对，与上一条完全一致就丢弃             |
+| 预览没有归属信息       | `snapshotTranscriptText` 只认文字，不认是谁的                                                           | `readDomPreview(doc, { videoId, skipSnapshot, avoidSignature })` 三道闸门一起判；而且预览**不进缓存、不当最终结果**，最坏也只闪一下就被完整字幕覆盖                            |
+| 播放器响应滞后         | `playerResponse` 还挂着上一个视频，用它取 `captionTracks` 会拉到**上一页**的 timedtext；storyboard 同理 | `sources.ts` 校验 `playerResponse.videoDetails.videoId`，不匹配就不取轨道（改走 innertube 探测）；`readStoryboardSpec(win, videoId)` 同样校验                                  |
+| 拦截层归属错标         | `get_transcript` 的 videoId 用地址栏猜，切页时会把旧视频的响应当成新视频                                | 先读 **POST body 的 base64(protobuf) `params`**（`0x0a 0x0b <11 字节 id>`），读不到再退**请求发出那一刻的播放器 id**，最后才是地址栏；归属为 `null` 的捕获不命中任何 `waitFor` |
 
 #### 三、最后一道闸门：可见即正确
 
@@ -286,11 +283,11 @@ availableLangs = 原生 captionTracks 的语言      ← 只有这个
 
 解析规则（`src/core/langs.ts` 的 `resolveLangPlan`）：
 
-| 选择 | 轨道偏好顺序 | 是否翻译 |
-| --- | --- | --- |
-| 同音频 | 浏览器语言 → zh → en | 否 |
-| 中文 | `zh-Hans` → `zh-Hant` → `zh` → `zh-CN` → `zh-TW` | 否（按钮只在有原生中文时可点） |
-| English | `en` | 否（按钮只在有原生英文时可点） |
+| 选择    | 轨道偏好顺序                                     | 是否翻译                       |
+| ------- | ------------------------------------------------ | ------------------------------ |
+| 同音频  | 浏览器语言 → zh → en                             | 否                             |
+| 中文    | `zh-Hans` → `zh-Hant` → `zh` → `zh-CN` → `zh-TW` | 否（按钮只在有原生中文时可点） |
+| English | `en`                                             | 否（按钮只在有原生英文时可点） |
 
 `tlang` 机翻的代码仍保留在 `tryTrack` 里（选中的轨道确实不匹配目标语言时才会拼上），
 但 UI 不会再引导用户走到那条路——它能否成功取决于视频与 YouTube 的签名策略，无法保证。
@@ -348,7 +345,16 @@ videoId   B  ✓ 与当前页一致
 
 `get_transcript` 返回的是 2–4 秒一段的 ASR 碎片，YouTube 原生面板会把连续几段合成一条、只在段落开头留一个时间码。我们以前把每个 segment 单独渲染成一行，同一份数据看起来「特别散」。
 
-`mergeFragments()`（`src/core/lines.ts`）做一次线性遍历补上这一步：相邻间隔 ≤ 8s、合并后 ≤ 140 字符、跨度 ≤ 12s 才合并；`[CHEERING, APPLAUSE]` 这类舞台提示独立成行；中文边界不加空格、英文边界补空格；保留首段 `start`（点击跳转 / 播放高亮靠它），并把 `dur` 重算成「末段结束 − 首段开始」（SRT 导出靠它，否则段落会被截短）。
+`mergeFragments()`（`src/core/lines.ts`）做一次线性遍历补上这一步，判据是**时间跨度**：
+
+- **一行攒满约 8 秒就换行**（跨度 = 本段 `start` − 行首 `start`）。这不是拍脑袋：同一份数据里，原生面板每一条覆盖 7–8 秒 —— `0:00→0:08`（两段，53 字）、`0:08→0:15`（四段，149 字）、`0:20→0:28`（两段，83 字）。字符数从 20 到 149 完全不固定，跨度却稳定；照这个粒度分组，9 段碎片正好切成和原生面板一模一样的 4 条。
+- **只用 `start`，不用结束时间**。`endMs` / `dDurationMs` 常缺失或盖过下一段，算不出「停顿」；跨度只需要两个起点，不受影响。
+- **标点只作参考、不作判据** —— 大多数碎片根本没有句末标点，指着它切会把整段字滚成一块。
+- `[CHEERING, APPLAUSE]` 这类舞台提示独立成行，前后都断开；中文边界不加空格、英文边界补空格。
+- 章节之间隔几分钟，跨度判据会自然把行断开，不用额外处理。
+- **片段本身不再切开**（切了就没有对应的时间点）。保留首段 `start`（点击跳转 / 播放高亮靠它），`dur` 取到末段结束，异常超长的单段时长截到 4s（SRT 导出靠 `dur`）。字数上限 240 只在时间码异常（多段挤在同一秒）时兜底。
+
+底栏「诊断」里新增一行 **「句子合并：475 → 118 行」**。数字没变就说明合并没生效，可以直接据此定位，不用猜。粒度就是 `MERGE_MAX_SPAN_MS`（默认 8000）：调小 = 每行更短、行数更多，调大 = 每行更长、行数更少。
 
 ## 加一层新抓取
 
@@ -358,13 +364,13 @@ videoId   B  ✓ 与当前页一致
 
 ## 排错
 
-| 现象 | 先看 |
-| --- | --- |
-| 面板一直「抓取中」 | 调试台的 `[ytt]` 日志，确认 bridge 是否 `PING` 通（`MAIN world bridge unreachable` 说明注入失败） |
-| 显示 `POT_ENFORCED` | 先手动点开一次 YouTube 原生字幕面板，再点重试，让被动拦截层拿到请求 |
-| 显示 `NO_CAPTION_TRACK` | 视频确实没有字幕轨；`captionTracks` 为空 |
-| 字幕重复 | 别去改 `collapseDuplicates` 的触发条件，那是 DOM 双份渲染的兜底，根因在 `pickPanel` / `collectFromList` |
-| 页面结构变了 | `src/core/dom/selectors.ts` 是唯一改选择器的地方 |
+| 现象                    | 先看                                                                                                    |
+| ----------------------- | ------------------------------------------------------------------------------------------------------- |
+| 面板一直「抓取中」      | 调试台的 `[ytt]` 日志，确认 bridge 是否 `PING` 通（`MAIN world bridge unreachable` 说明注入失败）       |
+| 显示 `POT_ENFORCED`     | 先手动点开一次 YouTube 原生字幕面板，再点重试，让被动拦截层拿到请求                                     |
+| 显示 `NO_CAPTION_TRACK` | 视频确实没有字幕轨；`captionTracks` 为空                                                                |
+| 字幕重复                | 别去改 `collapseDuplicates` 的触发条件，那是 DOM 双份渲染的兜底，根因在 `pickPanel` / `collectFromList` |
+| 页面结构变了            | `src/core/dom/selectors.ts` 是唯一改选择器的地方                                                        |
 
 ## 许可
 

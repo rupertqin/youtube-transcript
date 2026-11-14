@@ -115,6 +115,11 @@ export function createStatusBar(options: StatusBarOptions = {}): StatusBarHandle
     );
     // 章节截图只靠 storyboard 规格串：没有它就整列空白，值得单独报一行
     popover.appendChild(row('章节截图', state.storyboard ? '规格已就绪' : '未取到规格'));
+    // 「字幕太散」自检：原始分段 → 合并后行数。数字没变就说明合并没生效
+    if (state.mergeStats) {
+      const { raw, merged } = state.mergeStats;
+      popover.appendChild(row('句子合并', `${raw} → ${merged} 行`));
+    }
 
     if (mismatch) {
       popover.insertBefore(

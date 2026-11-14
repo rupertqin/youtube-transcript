@@ -108,6 +108,8 @@ export interface PanelState {
   cached: boolean;
   /** false = 当前显示的是临时预览，完整结果还在路上 */
   complete: boolean;
+  /** 句子合并自检：原始 ASR 分段数 → 展示行数（诊断弹层可见） */
+  mergeStats?: { raw: number; merged: number } | null;
   failures: FailureRecord[];
   error: { code: ErrorCode; detail?: string } | null;
   /** 当前高亮行（字幕视图用），-1 表示无 */
