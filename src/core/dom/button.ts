@@ -22,21 +22,14 @@ function buildIcon(doc: Document): SVGSVGElement {
   svg.setAttribute('fill', 'none');
   svg.setAttribute('aria-hidden', 'true');
 
-  const rows: Array<[number, number]> = [
-    [5, 11],
-    [9, 11],
-    [13, 7],
-  ];
-  for (const [y, width] of rows) {
-    const rect = doc.createElementNS(ns, 'rect');
-    rect.setAttribute('x', '4');
-    rect.setAttribute('y', String(y - 1));
-    rect.setAttribute('width', String(width));
-    rect.setAttribute('height', '2');
-    rect.setAttribute('rx', '1');
-    rect.setAttribute('fill', 'currentColor');
-    svg.appendChild(rect);
-  }
+  // 与扩展图标同一个标记：字母 Y（YouTube 的首字母），三段等宽圆头线
+  const mark = doc.createElementNS(ns, 'path');
+  mark.setAttribute('d', 'M4.6 4.3 L10 9.7 M15.4 4.3 L10 9.7 M10 9.7 L10 15.7');
+  mark.setAttribute('stroke', 'currentColor');
+  mark.setAttribute('stroke-width', '3');
+  mark.setAttribute('stroke-linecap', 'round');
+  mark.setAttribute('stroke-linejoin', 'round');
+  svg.appendChild(mark);
   return svg;
 }
 
