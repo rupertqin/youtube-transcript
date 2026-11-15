@@ -46,6 +46,17 @@ export interface TimedTextHook {
   latest(videoId?: string): TimedTextCapture | null;
   /** 等待一条属于 videoId 的新响应（会先检查历史捕获） */
   waitFor(videoId: string, timeoutMs: number): Promise<TimedTextCapture | null>;
+  /**
+   * 等待一条**满足条件**的响应（会先检查历史捕获）。
+   *
+   * `waitFor` 只要视频对得上就立即返回，切语言时会把手上那条英文顶回来；
+   * 这里按语言过滤，用户切一次 CC 语言后才算命中。
+   */
+  waitForMatch?(
+    videoId: string,
+    match: (capture: TimedTextCapture) => boolean,
+    timeoutMs: number,
+  ): Promise<TimedTextCapture | null>;
   /** 订阅实时捕获：用户手动打开原生面板时，YouTube 会自己发请求 */
   onCapture(listener: (capture: TimedTextCapture) => void): () => void;
   dispose(): void;
@@ -58,6 +69,8 @@ const MAX_CAPTURES = 8;
 
 interface Waiter {
   videoId: string;
+  /** 有它时只有满足条件的捕获才会唤醒（切语言场景） */
+  match?: (capture: TimedTextCapture) => boolean;
   resolve: (capture: TimedTextCapture | null) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -115,6 +128,8 @@ export function installTimedTextHook(win: Window): TimedTextHook {
       // 归属未知的 capture 不能作为任何视频的命中：宁可超时走下一层，
       // 也不能把别的视频的字幕当成当前视频返回。
       if (!capture.videoId || capture.videoId !== waiter.videoId) continue;
+      // 指定了语言（切语言场景）：语言不符的那条不唤醒，继续等
+      if (waiter.match && !waiter.match(capture)) continue;
       clearTimeout(waiter.timer);
       waiters.delete(waiter);
       waiter.resolve(capture);
@@ -167,6 +182,24 @@ export function installTimedTextHook(win: Window): TimedTextHook {
     }
   };
 
+  const waitUntil = (
+    videoId: string,
+    match: ((capture: TimedTextCapture) => boolean) | undefined,
+    timeoutMs: number,
+  ): Promise<TimedTextCapture | null> =>
+    new Promise<TimedTextCapture | null>((resolve) => {
+      const waiter: Waiter = {
+        videoId,
+        match,
+        resolve,
+        timer: setTimeout(() => {
+          waiters.delete(waiter);
+          resolve(null);
+        }, Math.max(0, timeoutMs)),
+      };
+      waiters.add(waiter);
+    });
+
   const hook: TimedTextHook = {
     installedAt: Date.now(),
     captures: () => [...store],
@@ -177,17 +210,19 @@ export function installTimedTextHook(win: Window): TimedTextHook {
     waitFor(videoId: string, timeoutMs: number) {
       const cached = hook.latest(videoId);
       if (cached) return Promise.resolve(cached);
-      return new Promise<TimedTextCapture | null>((resolve) => {
-        const waiter: Waiter = {
-          videoId,
-          resolve,
-          timer: setTimeout(() => {
-            waiters.delete(waiter);
-            resolve(null);
-          }, Math.max(0, timeoutMs)),
-        };
-        waiters.add(waiter);
-      });
+      return waitUntil(videoId, undefined, timeoutMs);
+    },
+    waitForMatch(
+      videoId: string,
+      match: (capture: TimedTextCapture) => boolean,
+      timeoutMs: number,
+    ) {
+      // 历史捕获里已经有满足条件的：0ms 命中（用户先切语言、再点抓取）
+      const cached = store.find(
+        (capture) => capture.videoId === videoId && match(capture),
+      );
+      if (cached) return Promise.resolve(cached);
+      return waitUntil(videoId, match, timeoutMs);
     },
     onCapture(listener) {
       listeners.add(listener);

@@ -12,7 +12,13 @@ interface RawTrack {
 }
 
 interface RawPlayerResponse {
-  videoDetails?: { videoId?: string; title?: string; lengthSeconds?: string | number };
+  videoDetails?: {
+    videoId?: string;
+    title?: string;
+    lengthSeconds?: string | number;
+    /** 视频默认音轨语言：原生字幕面板返回的就是这条轨道 */
+    defaultAudioLanguage?: string;
+  };
   captions?: {
     playerCaptionsTracklistRenderer?: {
       captionTracks?: RawTrack[];

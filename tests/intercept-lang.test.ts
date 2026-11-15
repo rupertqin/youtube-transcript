@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { TimedTextCapture, TimedTextHook } from '../src/core/harvest/intercept';
-import { runInterceptSource } from '../src/core/harvest/sources';
+import { installTimedTextHook } from '../src/core/harvest/intercept';
+import { pickCapture, runInterceptSource } from '../src/core/harvest/sources';
 import { buildGetPanelParams } from '../src/core/harvest/get-panel';
 import {
   langFromGetTranscriptBody,
@@ -91,12 +92,13 @@ describe('拦截层不再把完整响应当「语言不符」丢掉', () => {
     at: Date.now(),
   };
 
-  it('语言码读不到时照样放行 —— 完整响应比 DOM 一屏重要', async () => {
+  it('语言未知的捕获：目标就是默认语言时放行（面板给的就是默认轨）', async () => {
     const outcome = await runInterceptSource(
       {
         videoId: VIDEO_ID,
-        langs: ['zh-Hans'],
-        tlang: 'zh-Hans',
+        langs: ['en'],
+        tlang: 'en',
+        defaultLang: 'en',
         signal: new AbortController().signal,
         log: () => undefined,
       },
@@ -107,6 +109,24 @@ describe('拦截层不再把完整响应当「语言不符」丢掉', () => {
     expect(outcome?.lines).toHaveLength(2);
     expect(outcome?.lines[0].text).toBe('hello');
     expect(outcome?.complete).toBe(true);
+  });
+
+  it('语言未知的捕获：目标是别的语言时不能顶（面板只会给默认轨）', async () => {
+    const outcome = await runInterceptSource(
+      {
+        videoId: VIDEO_ID,
+        langs: ['zh-Hans'],
+        tlang: 'zh-Hans',
+        defaultLang: 'en',
+        signal: new AbortController().signal,
+        log: () => undefined,
+      },
+      makeHook(capture),
+      100,
+    );
+
+    expect(outcome?.lines).toHaveLength(0);
+    expect(outcome?.failures?.[0].detail).toContain('切成目标语言');
   });
 
   it('语言码确定且不符时才丢弃（这才是「切成中文显示英文」的防线）', async () => {
@@ -125,5 +145,85 @@ describe('拦截层不再把完整响应当「语言不符」丢掉', () => {
 
     expect(outcome?.lines).toHaveLength(0);
     expect(outcome?.failures?.[0].code).toBe('NO_CAPTION_TRACK');
+    // 可执行的提示：告诉用户该去播放器里切语言
+    expect(outcome?.failures?.[0].detail).toContain('切成目标语言');
+  });
+});
+
+/**
+ * 「先手动切一次语言」方案：捕获里可能同时躺着多条不同语言的 timedtext，
+ * 必须按目标语言挑，而不是「最新一条」。
+ */
+describe('多语言：按语言挑捕获、按语言等待', () => {
+  function capture(lang: string, at: number): TimedTextCapture {
+    return {
+      url: `https://www.youtube.com/api/timedtext?v=${VIDEO_ID}&lang=${lang}&kind=asr&fmt=json3`,
+      kind: 'timedtext',
+      videoId: VIDEO_ID,
+      lang,
+      text: PAYLOAD,
+      at,
+    };
+  }
+
+  it('指定的语言不是最新那条时，也要挑到它', () => {
+    const captures = [capture('en', 200), capture('zh-Hans', 100)];
+    const picked = pickCapture(captures, {
+      videoId: VIDEO_ID,
+      langs: ['zh-Hans', 'en'],
+      tlang: 'zh-Hans',
+    });
+    expect(picked?.lang).toBe('zh-Hans');
+  });
+
+  it('只要原文（auto）时取最新那条', () => {
+    const captures = [capture('en', 100), capture('zh-Hans', 200)];
+    expect(pickCapture(captures, { videoId: VIDEO_ID, langs: ['en'], tlang: null })?.lang).toBe(
+      'zh-Hans',
+    );
+  });
+
+  it('语言未知的面板捕获不能顶替指定语言', () => {
+    const panelCapture: TimedTextCapture = {
+      url: 'https://www.youtube.com/youtubei/v1/get_panel?prettyPrint=false',
+      kind: 'get_panel',
+      videoId: VIDEO_ID,
+      lang: null,
+      text: PAYLOAD,
+      at: 300,
+    };
+    const picked = pickCapture([panelCapture, capture('zh-Hans', 100)], {
+      videoId: VIDEO_ID,
+      langs: ['zh-Hans'],
+      tlang: 'zh-Hans',
+    });
+    expect(picked?.lang).toBe('zh-Hans');
+  });
+
+  it('waitForMatch 只被目标语言唤醒（先到的英文不算）', async () => {
+    const fetchFn = async () => ({
+      ok: true,
+      clone: () => ({ text: async () => '{"events":[{"tStartMs":0,"segs":[{"utf8":"hi"}]}]}' }),
+    });
+    const win = {
+      fetch: fetchFn,
+      XMLHttpRequest: class {
+        open(): void {}
+        send(): void {}
+      },
+      location: { href: `https://www.youtube.com/watch?v=${VIDEO_ID}` },
+    } as unknown as Window;
+    const hook = installTimedTextHook(win);
+
+    await win.fetch(`https://www.youtube.com/api/timedtext?v=${VIDEO_ID}&lang=en&kind=asr&fmt=json3`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const pending = hook.waitForMatch!(VIDEO_ID, (item) => item.lang === 'zh-Hans', 1_000);
+    await win.fetch(
+      `https://www.youtube.com/api/timedtext?v=${VIDEO_ID}&lang=zh-Hans&kind=asr&fmt=json3`,
+    );
+
+    const hit = await pending;
+    expect(hit?.lang).toBe('zh-Hans');
   });
 });

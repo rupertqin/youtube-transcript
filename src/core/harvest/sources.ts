@@ -1,5 +1,5 @@
 import type { CaptionTrack, FailureRecord, HarvestContext, SourceOutcome, TranscriptLine } from '../types';
-import type { CaptureKind, TimedTextHook } from './intercept';
+import type { CaptureKind, TimedTextCapture, TimedTextHook } from './intercept';
 import { langMatches } from '../langs';
 import { probeInnertube } from './innertube';
 import { parseTimedText } from './parse';
@@ -169,8 +169,44 @@ export function linesFromCapture(capture: { kind: CaptureKind; text: string }): 
 }
 
 /**
+ * 从已捕获的响应里挑「最符合目标语言」的一条。
+ *
+ * 这是「手动切一次语言」方案的入口：用户在播放器里切一次字幕语言，YouTube 就会发
+ * 一条带 POT 的 timedtext（签名绑定 (video, lang)，匿名可读）。这条捕获是我们
+ * 拿到**非默认轨道**全文的唯一途径 —— `get_panel` 永远只给默认轨道。
+ *
+ * 以前这里只看「最新一条」：先切日语、再切回英语，日语那条就被顶掉了。
+ * 现在的优先级：tlang 精确匹配 → langs 里任意一项 → 最新。
+ */
+export function pickCapture(
+  captures: readonly TimedTextCapture[],
+  ctx: Pick<HarvestContext, 'videoId' | 'langs' | 'tlang'>,
+): TimedTextCapture | null {
+  const mine = captures
+    .filter((item) => item.videoId === ctx.videoId)
+    .sort((a, b) => b.at - a.at);
+  if (mine.length === 0) return null;
+  if (!ctx.tlang) return mine[0];
+
+  // 指定了产出语言时，只认「能验证语言」的 timedtext：
+  // 面板捕获（get_panel）的 lang 是 null，它就是默认轨道，拿来顶等于给错语言。
+  const timed = mine.filter((item) => item.kind === 'timedtext' && item.lang);
+  const exact = timed.find((item) => langMatches(item.lang, ctx.tlang));
+  return exact ?? timed[0] ?? mine[0];
+}
+
+/** 这条捕获能不能满足「指定的产出语言」。 */
+function satisfiesLang(ctx: HarvestContext, capture: TimedTextCapture): boolean {
+  if (!ctx.tlang) return true;
+  if (capture.lang) return langMatches(capture.lang, ctx.tlang);
+  // 语言未知的捕获只可能来自原生面板（get_panel），而面板永远返回**默认轨道**。
+  // 所以只有「要的就是默认语言」时它才满足需求，否则就是把原文当译文。
+  return langMatches(ctx.defaultLang ?? null, ctx.tlang);
+}
+
+/**
  * ① 被动拦截：等 YouTube 自己发出的字幕响应。
- * 可能是 timedtext（带 POT 的播放器请求），也可能是 get_transcript（原生面板的数据）。
+ * 可能是 timedtext（带 POT 的播放器请求），也可能是 get_panel（原生面板的数据）。
  */
 export async function runInterceptSource(
   ctx: HarvestContext,
@@ -178,14 +214,26 @@ export async function runInterceptSource(
   timeoutMs: number,
 ): Promise<SourceOutcome | null> {
   if (!hook) return null;
-  const capture = await hook.waitFor(ctx.videoId, timeoutMs);
+  let capture = pickCapture(hook.captures(), ctx);
+  // 历史捕获里没有这个东西时问一下 hook（它会立刻返回最新的历史捕获）
+  if (!capture) capture = await hook.waitFor(ctx.videoId, 0).catch(() => null);
+
+  // 已有捕获但语言不对（用户想要中文，手上这条是英文）：等一会儿。
+  // 我们在等待期间切一次 CC 语言的话，新的那条 timedtext 会立刻被挑中。
+  if (timeoutMs > 0 && (!capture || !satisfiesLang(ctx, capture))) {
+    const matched = hook.waitForMatch
+      ? await hook
+          .waitForMatch(ctx.videoId, (item) => satisfiesLang(ctx, item), timeoutMs)
+          .catch(() => null)
+      : await hook.waitFor(ctx.videoId, timeoutMs).catch(() => null);
+    if (matched) capture = pickCapture(hook.captures(), ctx) ?? matched;
+  }
+
   if (!capture) return null;
 
-  // 请求了翻译、但捕获到的是原声轨道：它满足不了目标语言。
+  // 捕获到的是原声轨道 / 语言未知：满足不了目标语言。
   // 放行就会「切成中文显示英文」，而且状态是 ready，用户完全看不出哪里不对。
-  // **只在语言码确实读到了且不符时才丢弃**：`get_transcript` 的 lang 以前恒为 null，
-  // 一见 tlang 就整条丢掉完整响应，结果永远只能退到 DOM 读虚拟列表那一屏。
-  if (ctx.tlang && capture.lang && !langMatches(capture.lang, ctx.tlang)) {
+  if (!satisfiesLang(ctx, capture)) {
     return {
       lines: [],
       source: 'intercept',
@@ -195,7 +243,7 @@ export async function runInterceptSource(
           source: 'intercept',
           code: 'NO_CAPTION_TRACK',
           ms: 0,
-          detail: `捕获的是 ${capture.lang ?? '未知语言'}，不是要的 ${ctx.tlang}`,
+          detail: `捕获的是 ${capture.lang ?? '未知语言'}，不是要的 ${ctx.tlang}；在播放器里把字幕语言切成目标语言后再重试`,
         },
       ],
     };

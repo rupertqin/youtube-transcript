@@ -222,8 +222,32 @@ function innerTubeHeaders(
 
 export interface PanelOutcome {
   lines: TranscriptLine[];
-  /** get_panel 的 params 里不带语言码，读不到就返回 null（不编造） */
+  /** 这条轨道的语言码；推不出来就是 null（绝不编造） */
   lang: string | null;
+}
+
+/**
+ * `get_panel` 的 params 里没有语言位（实测：149 里 field 2 直接 400，
+ * field 3/4~8 塞语言或轨道一律被忽略，`hl`/`gl` 也不影响），
+ * 响应分段也不带语言码 —— 面板永远返回**视频默认轨道**。
+ *
+ * 所以语言只能从页面推断：用 `videoDetails.defaultAudioLanguage`。
+ *
+ * **不能用 `captionTracks[0]`**：多轨视频里第一条未必是默认轨
+ * （实测 uxdh2lqc-1Y 的 captionTracks 第一条是 `ar`，面板实际给的是英文）。
+ * 推不出来就返回 null —— 上层据此决定要不要走翻译，而不是瞎猜。
+ */
+function panelLang(win: Window): string | null {
+  const scope = win as unknown as {
+    ytInitialPlayerResponse?: { videoDetails?: { defaultAudioLanguage?: string } };
+  };
+  try {
+    const audio = scope.ytInitialPlayerResponse?.videoDetails?.defaultAudioLanguage;
+    if (typeof audio === 'string' && audio) return audio;
+  } catch {
+    /* 页面对象不可读 */
+  }
+  return null;
 }
 
 /**
@@ -286,8 +310,9 @@ export async function fetchGetPanel(options: {
 
     const lines = parseGetTranscript(text);
     if (lines.length > 0) {
-      lastDiagnostic = `get_panel OK: ${lines.length} 行`;
-      return { lines, lang: null };
+      const lang = panelLang(win);
+      lastDiagnostic = `get_panel OK: ${lines.length} 行（${lang ?? '语言未知'}）`;
+      return { lines, lang };
     }
 
     // 200 但解析不出分段：结构又变了 —— 把原始响应的头暴露出来，别让人瞎猜

@@ -6,7 +6,14 @@ import { installShadowCapture } from '../src/core/dom/shadow';
 import { harvestTranscript } from '../src/core/harvest/chain';
 import { fetchPanelTranscript } from '../src/core/harvest/get-panel';
 import { installTimedTextHook } from '../src/core/harvest/intercept';
-import { hasNativeTrackFor, readAvailableLangs, readTitleFor, readVideoId } from '../src/core/harvest/player';
+import { interceptWithAutoSwitch } from '../src/core/harvest/player-track';
+import {
+  hasNativeTrackFor,
+  readAvailableLangs,
+  readPlayerResponse,
+  readTitleFor,
+  readVideoId,
+} from '../src/core/harvest/player';
 import { runInterceptSource, runRemoteSources } from '../src/core/harvest/sources';
 import { langMatches, pickUsableChoice, resolveLangPlan } from '../src/core/langs';
 import { log } from '../src/core/log';
@@ -46,7 +53,15 @@ import { createSidebarPanel } from '../src/ui/sidebar';
         const plan = langPlan();
         // 没有目标语言的原生轨道时，拦截层/结构化源只能给原文 —— 必须让远程先上
         const needsTranslation = Boolean(plan.tlang) && !hasNativeTrackFor(win, plan.tlang!);
-        const ctx = { videoId, langs: plan.langs, tlang: plan.tlang, signal, log };
+        const ctx = {
+          videoId,
+          langs: plan.langs,
+          tlang: plan.tlang,
+          // 面板捕获永远是默认轨道：判断「语言未知的捕获能否满足需求」要用它
+          defaultLang: readPlayerResponse(win)?.videoDetails?.defaultAudioLanguage ?? null,
+          signal,
+          log,
+        };
 
         const domOptions = () => ({
           videoId,
@@ -95,8 +110,18 @@ import { createSidebarPanel } from '../src/ui/sidebar';
               timeoutMs: 6_000,
             });
             if (!outcome || outcome.lines.length === 0) return null;
-            // 语言码为空（page-params 那一路拿不到）时不要判成「语言不符」，完整结果优先
-            if (needsTranslation && outcome.lang && !langMatches(outcome.lang, plan.tlang)) return null;
+            // 面板永远只给视频**默认轨道**（params 里没有语言位，实测加不进去）。
+            // 用户指定了别的语言时，拿它顶就是「切中文显示英文」，而且状态是 ready，
+            // 用户完全看不出哪里不对 —— 宁可失败，让拦截层去等用户切一次 CC 语言。
+            if (plan.tlang && outcome.lang && !langMatches(outcome.lang, plan.tlang)) {
+              throw Object.assign(
+                new Error(
+                  `get_panel 只给默认轨 ${outcome.lang}，要的是 ${plan.tlang}；` +
+                    '在播放器里把字幕语言切成目标语言后点重试',
+                ),
+                { code: 'NO_CAPTION_TRACK' as const },
+              );
+            }
             return {
               lines: outcome.lines,
               source: 'innertube',
@@ -116,8 +141,21 @@ import { createSidebarPanel } from '../src/ui/sidebar';
           // 但原生面板走的是 get_panel，和 CC 无关 —— 逼它重新发一次请求，
           // hook 截下来的是**完整响应**（不是虚拟列表那几十行），抓完由 finally 收起。
           intercept: async (timeoutMs) => {
-            await ensureFreshTranscriptRequest(document, { timeoutMs: 1_200 }).catch(() => null);
-            return runInterceptSource(ctx, hook, timeoutMs);
+            // 指定了产出语言时不点面板：面板永远只给默认轨，点开只会闪一下然后
+            // 被语言检查拒掉。这时要等的是带 POT 的 timedtext 捕获。
+            if (!plan.tlang) {
+              await ensureFreshTranscriptRequest(document, { timeoutMs: 1_200 }).catch(
+                () => null,
+              );
+            }
+            // 先白嫖已有捕获；没有再（可选）主动切一次 CC 轨道去截
+            return interceptWithAutoSwitch({
+              win,
+              hook,
+              ctx,
+              timeoutMs,
+              enabled: getPrefs().autoSwitchTrack,
+            });
           },
           // 只收我们自己点开的面板：用户手动开的不动（否则会看到「字幕框闪一下」）
           closePanel: () => closeTranscriptPanelIfOurs(document),

@@ -138,7 +138,12 @@ export default defineContentScript({
               ? async () => {
                   const payload = await bridge.request<RemotePayload | null>(
                     'WAIT_TIMEDTEXT',
-                    { videoId, timeoutMs: 0, tlang: langPlan().tlang },
+                    {
+                      videoId,
+                      timeoutMs: 0,
+                      tlang: langPlan().tlang,
+                      langs: langPlan().langs,
+                    },
                     3000,
                   );
                   return toOutcome(payload);
@@ -149,10 +154,24 @@ export default defineContentScript({
                   // 同油猴端：CC 关着时播放器不发 timedtext，
                   // 但原生面板的 get_transcript 与 CC 无关 —— 面板已开着时收起再点开，
                   // 逼它重新请求（POST 不会被缓存），截到的是完整响应。
-                  await ensureFreshTranscriptRequest(document, { timeoutMs: 1_200 }).catch(() => null);
+                  //
+                  // 指定了产出语言时不点：面板永远只给默认轨，点开只会闪一下然后
+                  // 被语言检查拒掉。这时该等的是用户切 CC 语言（timedtext 捕获）。
+                  if (!langPlan().tlang) {
+                    await ensureFreshTranscriptRequest(document, { timeoutMs: 1_200 }).catch(
+                      () => null,
+                    );
+                  }
                   const payload = await bridge.request<RemotePayload | null>(
                     'WAIT_TIMEDTEXT',
-                    { videoId, timeoutMs, tlang: langPlan().tlang },
+                    {
+                      videoId,
+                      timeoutMs,
+                      tlang: langPlan().tlang,
+                      langs: langPlan().langs,
+                      // A 方案：目标语言还没有捕获时，让播放器主动切一次 CC 轨道
+                      autoSwitch: getPrefs().autoSwitchTrack,
+                    },
                     timeoutMs + 3000,
                   );
                   return toOutcome(payload);
@@ -170,13 +189,17 @@ export default defineContentScript({
                   );
                   const outcome = toOutcome(payload);
                   if (!outcome) return null;
-                  // 语言码为空时不要判成「语言不符」，完整结果优先
-                  if (
-                    needsTranslation &&
-                    outcome.track?.languageCode &&
-                    !langMatches(outcome.track.languageCode, plan.tlang)
-                  ) {
-                    return null;
+                  // 面板永远只给视频**默认轨道**（params 没有语言位）。
+                  // 指定了别的语言时不能拿它顶，否则就是「切中文显示英文」。
+                  const got = outcome.track?.languageCode;
+                  if (plan.tlang && got && !langMatches(got, plan.tlang)) {
+                    throw Object.assign(
+                      new Error(
+                        `get_panel 只给默认轨 ${got}，要的是 ${plan.tlang}；` +
+                          '在播放器里把字幕语言切成目标语言后点重试',
+                      ),
+                      { code: 'NO_CAPTION_TRACK' as const },
+                    );
                   }
                   return outcome;
                 }

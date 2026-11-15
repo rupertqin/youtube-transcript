@@ -1,10 +1,9 @@
 import { installShadowCapture } from '../src/core/dom/shadow';
 import { fetchPanelTranscript } from '../src/core/harvest/get-panel';
 import { installTimedTextHook } from '../src/core/harvest/intercept';
-import { linesFromCapture } from '../src/core/harvest/sources';
 import { runRemoteSources } from '../src/core/harvest/sources';
-import { readStoryboardSpec } from '../src/core/harvest/player';
-import { langMatches } from '../src/core/langs';
+import { interceptWithAutoSwitch } from '../src/core/harvest/player-track';
+import { readPlayerResponse, readStoryboardSpec } from '../src/core/harvest/player';
 import { log } from '../src/core/log';
 import type { HarvestContext } from '../src/core/types';
 import { createBridgeEndpoint } from '../src/platform/bridge';
@@ -19,7 +18,7 @@ export default defineContentScript({
   runAt: 'document_start',
   world: 'MAIN',
   main() {
-  installShadowCapture(window);
+    installShadowCapture(window);
     const hook = installTimedTextHook(window);
     const endpoint = createBridgeEndpoint(window);
 
@@ -102,44 +101,32 @@ export default defineContentScript({
     });
 
     endpoint.handle('WAIT_TIMEDTEXT', async (raw) => {
-      const payload = raw as { videoId?: string; timeoutMs?: number; tlang?: string | null } | null;
+      const payload = raw as {
+        videoId?: string;
+        timeoutMs?: number;
+        tlang?: string | null;
+        langs?: string[];
+        autoSwitch?: boolean;
+      } | null;
       const videoId = payload?.videoId;
       if (!videoId) return null;
 
-      const capture = await hook.waitFor(videoId, payload?.timeoutMs ?? 2500);
-      if (!capture) return null;
-
-      // 要的是另一种语言，但捕获到的是原声轨道：这一层给不了翻译结果，
-      // 放行就会「切成中文显示英文」且状态是 ready，用户看不出问题。
-      // **只在语言码确实读到了且不符时才丢弃**：get_transcript 的 lang 读不到时是 null，
-      // 一见 tlang 就整条丢掉完整响应，结果永远只能退到 DOM 读虚拟列表那一屏。
-      const tlang = payload?.tlang ?? null;
-      if (tlang && capture.lang && !langMatches(capture.lang, tlang)) return null;
-
-      const lines = linesFromCapture(capture);
-      if (lines.length === 0) {
-        return {
-          lines: [],
-          source: 'intercept',
-          showTimestamps: true,
-          failures: [
-            {
-              source: 'intercept',
-              code: 'EMPTY_200',
-              ms: 0,
-              detail: `截到了 ${capture.kind} 响应（${capture.text.length} 字符）但解析出 0 行`,
-            },
-          ],
-        };
-      }
-
-      return {
-        lines,
-        source: 'intercept',
-        showTimestamps: true,
-        track: capture.lang ? { baseUrl: capture.url, languageCode: capture.lang } : undefined,
-        failures: [],
-      };
+      // 和油猴端走同一套逻辑：按目标语言挑捕获、语言不符就等新的一条；
+      // 还没有就问播放器要（切一次 CC 轨道 → 截带 POT 的 timedtext → 切回来）。
+      return interceptWithAutoSwitch({
+        win: window,
+        hook,
+        ctx: {
+          videoId,
+          langs: payload?.langs ?? [],
+          tlang: payload?.tlang ?? null,
+          defaultLang: readPlayerResponse(window)?.videoDetails?.defaultAudioLanguage ?? null,
+          signal: new AbortController().signal,
+          log,
+        },
+        timeoutMs: payload?.timeoutMs ?? 2500,
+        enabled: Boolean(payload?.autoSwitch),
+      });
     });
   },
 });

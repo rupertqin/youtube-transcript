@@ -80,6 +80,13 @@ export interface HarvestContext {
    * 只在「视频没有该语言的原生字幕」时才会真正拼进 URL。
    */
   tlang?: string | null;
+  /**
+   * 视频的默认语言（`videoDetails.defaultAudioLanguage`）。
+   *
+   * 原生字幕面板永远返回默认轨道，所以「语言未知的面板捕获」只有在
+   * 目标语言就是默认语言时才算满足需求。
+   */
+  defaultLang?: string | null;
   signal: AbortSignal;
   log: Logger;
 }

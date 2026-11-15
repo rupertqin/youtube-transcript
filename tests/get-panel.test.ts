@@ -220,6 +220,37 @@ describe('fetchGetPanel：只发一次，形状照抄原生', () => {
     expect(params).not.toBe(PAGE_PARAMS);
   });
 
+  it('语言取自 defaultAudioLanguage（面板就是默认轨），且不看 captionTracks[0]', async () => {
+    const fetchFn = (async () => new Response(SEGMENTS, { status: 200 })) as unknown as typeof fetch;
+    const withMeta = {
+      ...winWithPage(),
+      ytInitialPlayerResponse: {
+        // 多轨视频第一条未必是默认轨（实测 uxdh2lqc-1Y 第一条是 ar，面板给的是 en）
+        captions: { playerCaptionsTracklistRenderer: { captionTracks: [{ languageCode: 'ar' }] } },
+        videoDetails: { defaultAudioLanguage: 'en' },
+      },
+    } as unknown as Window;
+
+    const hit = await fetchGetPanel({
+      win: withMeta,
+      fetchFn,
+      videoId: REAL_VIDEO,
+      signal: signal(),
+      timeoutMs: 3_000,
+    });
+    expect(hit?.lang).toBe('en');
+
+    const miss = await fetchGetPanel({
+      win: winWithPage(),
+      fetchFn,
+      videoId: REAL_VIDEO,
+      signal: signal(),
+      timeoutMs: 3_000,
+    });
+    // 不编造：推不出来就是 null（上层据此决定要不要走翻译）
+    expect(miss?.lang).toBeNull();
+  });
+
   it('HTTP 400 时不重试（同一个请求再来一遍没有意义）', async () => {
     let calls = 0;
     const fetchFn = (async () => {
