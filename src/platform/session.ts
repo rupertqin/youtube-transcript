@@ -126,6 +126,7 @@ export function createSession(options: SessionOptions): Session {
     store.setState({
       videoId,
       site: site.id,
+      sourceUrl: site.url(videoId),
       title: site.title(videoId),
       status: 'ready',
       lines: displayLines,
@@ -214,6 +215,7 @@ export function createSession(options: SessionOptions): Session {
         store.setState({
           videoId,
           site: site.id,
+          sourceUrl: site.url(videoId),
           title: cached.title || site.title(videoId),
           status: 'ready',
           lines: displayLines,
@@ -295,6 +297,7 @@ export function createSession(options: SessionOptions): Session {
       const storyboard = await loadStoryboard(videoId);
       store.setState({
         status: 'error',
+        sourceUrl: site.url(videoId),
         error: { code, detail: (error as Error).message },
         failures,
         lines: [],
@@ -308,7 +311,7 @@ export function createSession(options: SessionOptions): Session {
         // 诊断文本首行印版本号：复制文本发出来就能立刻确认跑的是哪一版
         diagnostic:
           [
-            `脚本版本: v${typeof __YTT_VERSION__ === 'string' ? __YTT_VERSION__ : 'dev'}`,
+            `脚本版本: v${typeof __TRANSCRIPT_STUDIO_VERSION__ === 'string' ? __TRANSCRIPT_STUDIO_VERSION__ : 'dev'}`,
             site.diagnostic() ?? '',
           ]
             .filter((line) => line.length > 0)
@@ -383,6 +386,7 @@ export function createSession(options: SessionOptions): Session {
     store.setState({
       ...emptyPanelState(videoId),
       site: site.id,
+      sourceUrl: site.url(videoId),
       status: 'loading',
       title: site.title(videoId),
       availableLangs: site.availableLangs(videoId),

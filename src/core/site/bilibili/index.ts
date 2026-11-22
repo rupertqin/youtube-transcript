@@ -73,6 +73,11 @@ export function createBilibiliSite(options: BilibiliSiteOptions): SiteAdapter {
     return parsed ? biliVideoKey(parsed.bvid, parsed.page) : null;
   };
   const currentId = (): string | null => videoIdOf(win.location);
+  const urlFor = (videoId: string): string | null => {
+    const parsed = splitBiliVideoKey(videoId);
+    if (!parsed) return null;
+    return `https://www.bilibili.com/video/${parsed.bvid}${parsed.page > 1 ? `?p=${parsed.page}` : ''}`;
+  };
 
   function tracksFor(videoId: string): BiliTrack[] {
     return tracksByVideo.get(videoId) ?? [];
@@ -159,6 +164,7 @@ export function createBilibiliSite(options: BilibiliSiteOptions): SiteAdapter {
 
     match: (url) => url.hostname.endsWith('bilibili.com'),
     videoIdOf,
+    url: urlFor,
     /**
      * B 站没有 `getPlayerResponse` 这种权威接口，只能以地址栏为准。
      * 但内容归属仍然可靠：字幕体是按「请求时解析出的 bvid + cid」拿的，

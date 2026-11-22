@@ -45,7 +45,7 @@ export const ERROR_COPY: Record<ErrorCode, { title: string; hint: string }> = {
   },
   EMPTY_200: {
     title: '字幕请求返回空内容',
-    hint: 'YouTube 的 proof-origin token（POT）在拦。先手动打开一次原生字幕面板再重试。',
+    hint: '站点的 proof-origin token（POT）在拦。先手动打开一次原生字幕面板再重试。',
   },
   POT_ENFORCED: {
     title: '字幕接口被 token 校验拦截',

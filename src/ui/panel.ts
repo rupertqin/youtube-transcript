@@ -312,7 +312,7 @@ export function createPanel(options: PanelOptions): PanelHandle {
   const exportMeta = () => ({
     title: state.title,
     videoId: state.videoId,
-    url: `https://www.youtube.com/watch?v=${state.videoId}`,
+    url: state.sourceUrl ?? '',
     lang: state.lang,
     source: state.source,
   });

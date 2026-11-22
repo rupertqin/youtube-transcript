@@ -44,6 +44,7 @@ export function emptyPanelState(videoId = '', site = ''): PanelState {
   return {
     videoId,
     site,
+    sourceUrl: null,
     title: '',
     status: 'idle',
     lines: [],

@@ -63,7 +63,7 @@ export function createStatusBar(options: StatusBarOptions = {}): StatusBarHandle
   // 版本号常驻底栏：排查时第一件事就是确认装的是哪一版
   const versionText = h('span', {
     class: 'shrink-0 text-[11px] tabular-nums',
-    text: `v${typeof __YTT_VERSION__ === 'string' ? __YTT_VERSION__ : 'dev'}`,
+    text: `v${typeof __TRANSCRIPT_STUDIO_VERSION__ === 'string' ? __TRANSCRIPT_STUDIO_VERSION__ : 'dev'}`,
   });
   versionText.style.opacity = '0.65';
 

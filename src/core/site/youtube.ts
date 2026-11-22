@@ -96,6 +96,10 @@ export function createYouTubeSite(options: YouTubeSiteOptions): SiteAdapter {
     }
   };
   const currentId = (): string | null => videoIdOf(win.location);
+  const urlFor = (videoId: string): string | null =>
+    videoId
+      ? `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`
+      : null;
 
   const availableLangs = (videoId: string): string[] =>
     readAvailableLangs(win, videoId || undefined);
@@ -108,6 +112,7 @@ export function createYouTubeSite(options: YouTubeSiteOptions): SiteAdapter {
 
     match: (url) => url.hostname.endsWith('youtube.com'),
     videoIdOf,
+    url: urlFor,
     playerVideoId: () => readPlayerVideoId(win),
     title: (videoId) => readTitleFor(win, videoId),
     duration: () => readVideoDuration(win),

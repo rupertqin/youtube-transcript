@@ -27,7 +27,7 @@ const TIME_BASE =
   'mb-1.5 block w-fit rounded-[4px] bg-[var(--ytt-time-bg)] px-1.5 py-[1px] text-[12px] leading-[16px] tabular-nums transition-colors';
 const TIME_ON = 'text-[var(--ytt-text-dim)]';
 const TIME_OFF = 'text-[var(--ytt-text-mute)] group-hover:text-[var(--ytt-text-dim)]';
-/** 正文 14px / 20px：与 YouTube 正文的行高完全一致 */
+/** 正文 14px / 20px：与主流视频站的字幕行高一致 */
 const TEXT_BASE = 'min-w-0 flex-1 text-[14px] leading-[20px]';
 const TEXT_ON = 'font-medium text-[var(--ytt-text)]';
 const TEXT_OFF = 'text-[var(--ytt-text-dim)] group-hover:text-[var(--ytt-text)]';

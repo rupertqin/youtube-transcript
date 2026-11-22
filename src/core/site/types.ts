@@ -86,6 +86,8 @@ export interface SiteAdapter {
   match(url: URL): boolean;
   /** 地址栏 → 视频 id（B 站带分 P：`BV1xx:p2`） */
   videoIdOf(location: { href: string }): string | null;
+  /** 视频 id → 站点原生地址；导出元数据不能再硬编码某个站点 */
+  url(videoId: string): string | null;
   /** 播放器此刻在播哪个视频：缓存写入的归属守卫 */
   playerVideoId(): string | null;
   title(videoId: string): string;

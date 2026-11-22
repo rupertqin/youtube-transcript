@@ -39,7 +39,7 @@ export function createRemoteClient(): TranscriptClient {
     store.setState({
       ...emptyPanelState(''),
       status: 'error',
-      error: { code: 'NO_CAPTION_TRACK', detail: '当前标签页不是 YouTube 视频页' },
+      error: { code: 'NO_CAPTION_TRACK', detail: '当前标签页不是支持的视频页' },
     });
   };
 

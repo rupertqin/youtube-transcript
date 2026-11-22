@@ -49,6 +49,7 @@ export function createFakeSite(options: FakeSiteOptions = {}): SiteAdapter {
     entryLabel: 'Transcript',
     match: () => true,
     videoIdOf,
+    url: (videoId: string) => `https://example.com/watch?v=${encodeURIComponent(videoId)}`,
     // 归属守卫：null = 取不到播放器 id，session 会放行（与真实站点的降级一致）
     playerVideoId: options.playerVideoId ?? (() => null),
     title: options.title ?? ((videoId: string) => `title-${videoId}`),

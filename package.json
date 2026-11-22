@@ -1,9 +1,9 @@
 {
-  "name": "youtube-transcript",
+  "name": "transcript-studio",
   "private": true,
   "version": "2.29.3",
   "type": "module",
-  "description": "YouTube transcript workbench for Chrome (MV3) and Tampermonkey, sharing one core.",
+  "description": "Cross-site transcript workbench for Chrome (MV3) and Tampermonkey, sharing one core.",
   "scripts": {
     "postinstall": "wxt prepare",
     "icons": "node scripts/gen-icons.mjs",

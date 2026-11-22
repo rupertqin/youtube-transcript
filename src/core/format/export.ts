@@ -38,7 +38,7 @@ export function toPlainText(lines: TranscriptLine[], options: { timestamps: bool
 
 export function toMarkdown(lines: TranscriptLine[], meta: ExportMeta): string {
   const header = [
-    `# ${meta.title || 'YouTube transcript'}`,
+    `# ${meta.title || 'Transcript'}`,
     '',
     `- Video: ${meta.url}`,
     `- Language: ${meta.lang ?? 'unknown'}`,

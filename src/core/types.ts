@@ -99,6 +99,8 @@ export interface PanelState {
   videoId: string;
   /** 站点 id（'youtube' | 'bilibili'）。UI 据此决定显示哪些能力，缓存据此分段。 */
   site: string;
+  /** 当前视频的站点原生地址；导出元数据用，横站不能再硬编码 youtube.com */
+  sourceUrl?: string | null;
   title: string;
   status: 'idle' | 'loading' | 'ready' | 'error';
   lines: TranscriptLine[];
