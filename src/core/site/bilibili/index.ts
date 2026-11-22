@@ -1,7 +1,7 @@
 import { harvestTranscript } from '../../harvest/chain';
 import { pickUsableChoice, resolveLangPlan, type LangChoice } from '../../langs';
 import type { ErrorCode, FailureRecord, HarvestResult, Logger, SourceOutcome } from '../../types';
-import { createFloatPanel } from '../../../ui/float';
+import { createSidebarWithEntryButton } from '../../../ui/sidebar-entry';
 import { SITE_CAPS } from '../registry';
 import type { SiteAdapter, SiteHarvestInput, SiteMountInput, SitePanelHandle } from '../types';
 import { createBiliApi, type BiliApi } from './api';
@@ -14,6 +14,7 @@ import {
   parseSubtitleBody,
   pickBiliTrack,
   splitBiliVideoKey,
+  withSourceHints,
   type BiliTrack,
 } from './parse';
 import { readBiliPageState, readRenderedSubtitle, type BiliPageSnapshot } from './page-state';
@@ -121,7 +122,8 @@ export function createBilibiliSite(options: BilibiliSiteOptions): SiteAdapter {
     const cid = view.pages.find((page) => page.page === parsed.page)?.cid ?? view.pages[0]?.cid ?? 0;
     biliCidCache.set(videoId, cid);
 
-    const tracks = await api.tracks(parsed.bvid, cid, signal);
+    // player 接口的轨道来源字段可能缺失，用 view.subtitle.list 交叉补齐
+    const tracks = withSourceHints(await api.tracks(parsed.bvid, cid, signal), view.subtitle?.list ?? []);
     rememberTracks(videoId, tracks);
     return { tracks, cid };
   }
@@ -250,14 +252,16 @@ export function createBilibiliSite(options: BilibiliSiteOptions): SiteAdapter {
     },
 
     mount(input: SiteMountInput): SitePanelHandle {
-      return createFloatPanel({
+      // 与 YouTube 同一套交互：一个入口按钮 + 一个右栏卡片。
+      // 只有抓取在背后按站点分开（这里走 WBI + 页面兜底），UI 不再有浮层分支。
+      return createSidebarWithEntryButton({
         doc: input.doc,
         css: input.css,
         client: input.client,
         currentVideoId: input.currentVideoId,
         label: site.entryLabel,
-        // 两站各自的展开状态互不影响
-        storageKey: 'ytt-float-open:bilibili',
+        // B 站右栏比 YouTube 窄，卡片矮一些
+        height: 'min(560px, 70vh)',
       });
     },
   };

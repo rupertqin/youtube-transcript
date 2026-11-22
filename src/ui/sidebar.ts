@@ -66,16 +66,27 @@ const OPEN_KEY = 'ytt-sidebar-open';
  */
 export function resolveSidebarMount(doc: Document): HTMLElement | null {
   const watch = doc.querySelector('ytd-watch-flexy');
-  if (!watch) return null;
-
-  for (const selector of ['#secondary-inner', '#secondary']) {
-    const el = doc.querySelector<HTMLElement>(selector);
-    if (el) return el;
-    // 有些实验版把右栏塞在 watch-flexy 内部的其他位置
-    const inner = watch.querySelector<HTMLElement>(selector);
-    if (inner) return inner;
+  if (watch) {
+    for (const selector of ['#secondary-inner', '#secondary']) {
+      const el = doc.querySelector<HTMLElement>(selector);
+      if (el) return el;
+      // 有些实验版把右栏塞在 watch-flexy 内部的其他位置
+      const inner = watch.querySelector<HTMLElement>(selector);
+      if (inner) return inner;
+    }
+    return null;
   }
-  return null;
+
+  // B 站普通 UP 主视频页：相关推荐那一列。
+  // 只认这几个明确的选择器，宽屏/影院等没有右栏的布局会返回 null，
+  // 由站点适配器退回右下浮层，不去改站点布局。
+  const vdcon = doc.querySelector('#mirror-vdcon');
+  const right =
+    vdcon?.querySelector<HTMLElement>('.right-container') ??
+    doc.querySelector<HTMLElement>('.video-container-v1 .right-container') ??
+    doc.querySelector<HTMLElement>('.right-container');
+  if (!right) return null;
+  return right.querySelector<HTMLElement>('.right-container-inner') ?? right;
 }
 
 export interface SidebarPanelOptions {
@@ -86,6 +97,8 @@ export interface SidebarPanelOptions {
   onToggle?: (open: boolean) => void;
   /** 地址栏当前视频；不传则从 doc.defaultView 读 */
   currentVideoId?: () => string | null;
+  /** 卡片高度；B 站右栏比 YouTube 窄，站点适配器会传更矮的值 */
+  height?: string;
 }
 
 export interface SidebarPanelHandle {
@@ -178,7 +191,7 @@ export function createSidebarPanel(options: SidebarPanelOptions): SidebarPanelHa
     // 卡片样式挂在面板根节点上：.ytt-root 自己定义了颜色变量，
     // 放在外层容器上会拿不到（浅色主题也切不过去）。
     panel.element.classList.add('ytt-card');
-    panel.element.style.setProperty('--ytt-card-height', EXPANDED_HEIGHT);
+    panel.element.style.setProperty('--ytt-card-height', options.height ?? EXPANDED_HEIGHT);
     host!.shadowRoot!.appendChild(panel.element);
     return panel;
   }

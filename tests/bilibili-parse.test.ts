@@ -8,7 +8,10 @@ import {
   parseSubtitleBody,
   pickBiliTrack,
   splitBiliVideoKey,
+  trackDisplayName,
   trackScore,
+  trackSource,
+  withSourceHints,
   type BiliTrack,
 } from '../src/core/site/bilibili/parse';
 
@@ -62,6 +65,41 @@ describe('轨道归一化', () => {
     expect(trackScore({ lan: 'zh-CN', type: 0, subtitle_url: 'a' })).toBeGreaterThan(
       trackScore({ lan: 'ai-zh', type: 1, subtitle_url: 'a' }),
     );
+  });
+});
+
+describe('轨道来源识别（投稿 / AI）', () => {
+  it('type=1 或 ai- 前缀或 AI CDN 都判为 AI', () => {
+    expect(trackSource({ lan: 'zh-CN', type: 1, subtitle_url: 'a' })).toBe('ai');
+    expect(trackSource({ lan: 'ai-zh', subtitle_url: 'a' })).toBe('ai');
+    expect(trackSource({ lan: 'zh-CN', subtitle_url: '//aisubtitle.hdslb.com/x.json' })).toBe('ai');
+  });
+
+  it('布尔字段也算：字符串 "1" 认作 AI，"0" 认作人工', () => {
+    expect(trackSource({ lan: 'zh-CN', is_ai: '1' })).toBe('ai');
+    expect(trackSource({ lan: 'zh-CN', is_ai: '0', is_ai_subtitle: false, is_machine: false })).toBe('human');
+  });
+
+  it('字段不全时用 view 接口的同轨信息补齐来源', () => {
+    const hints: BiliTrack[] = [
+      { id_str: 'auto-1', lan: 'zh-CN', type: 0, subtitle_url: 'https://x/a.json' },
+    ];
+    const [track] = withSourceHints(
+      [{ id_str: 'auto-1', lan: 'zh-CN', subtitle_url: '//x/a.json' }],
+      hints,
+    );
+    expect(track.source).toBe('human');
+    expect(trackDisplayName(track)).toContain('人工');
+  });
+
+  it('没有线索才是 unknown，不硬猜', () => {
+    expect(trackSource({ lan: 'ja-JP', subtitle_url: 'https://x/j.json' })).toBe('unknown');
+  });
+
+  it('人工任意语言优先于 AI 中文', () => {
+    expect(
+      trackScore({ lan: 'en-US', type: 0, subtitle_url: 'en.json' }),
+    ).toBeGreaterThan(trackScore({ lan: 'ai-zh', type: 1, subtitle_url: 'ai.json' }));
   });
 });
 

@@ -52,6 +52,7 @@ export function emptyPanelState(videoId = '', site = ''): PanelState {
     showTimestamps: true,
     source: null,
     lang: null,
+    trackLabel: null,
     availableLangs: [],
     cached: false,
     complete: true,

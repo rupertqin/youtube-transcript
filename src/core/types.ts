@@ -109,6 +109,8 @@ export interface PanelState {
   showTimestamps: boolean;
   source: SourceName | null;
   lang: string | null;
+  /** 站点给这条轨道的可读名（B 站会带「人工 / AI」来源后缀） */
+  trackLabel?: string | null;
   /**
    * 这条视频「能拿到哪些语言」的字幕：原生轨道 + YouTube 支持的机器翻译目标。
    * 语言切换按钮只显示这里列出的语言 —— 没有的字幕就不要给一个点了没反应的按钮。

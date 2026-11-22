@@ -33,6 +33,8 @@ export interface BiliView {
   /** 秒 */
   duration: number;
   pages: BiliPage[];
+  /** `view` 接口自带的字幕轨，用来给 player 接口的轨道补来源线索 */
+  subtitle?: { list?: BiliTrack[] };
 }
 
 export interface BiliApiOptions {
@@ -154,6 +156,7 @@ export function createBiliApi(options: BiliApiOptions): BiliApi {
             title?: string;
             duration?: number;
             pages?: Array<{ cid?: number; page?: number; part?: string }>;
+            subtitle?: { list?: BiliTrack[] };
           }
         | undefined;
       if (!data?.bvid) throw new BiliApiError(meta.code, '返回里没有 bvid');
@@ -170,6 +173,7 @@ export function createBiliApi(options: BiliApiOptions): BiliApi {
             part: page.part,
           }))
           .filter((page) => page.cid > 0),
+        subtitle: data.subtitle?.list?.length ? { list: data.subtitle.list } : undefined,
       };
       viewCache.set(bvid, { at: now(), value });
       return value;

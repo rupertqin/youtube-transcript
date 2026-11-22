@@ -136,6 +136,7 @@ export function createSession(options: SessionOptions): Session {
       showTimestamps: result.showTimestamps,
       source: result.source,
       lang: result.track?.languageCode ?? null,
+      trackLabel: result.track?.name ?? null,
       cached: false,
       failures: result.failures,
       error: null,

@@ -8,7 +8,7 @@
 
 | 能力                     | YouTube                | Bilibili                           |
 | ------------------------ | ---------------------- | ---------------------------------- |
-| 入口 / 面板              | masthead 按钮 + 右栏卡片 | 右下胶囊按钮 + 浮层卡片             |
+| 入口 / 面板              | masthead 按钮 + 右栏卡片 | 顶部导航「投稿」左侧按钮 + `.right-container-inner` 卡片（只有一个面板） |
 | 抓取                     | playerResponse / InnerTube / get_panel / DOM / timedtext 拦截 | WBI 签名的 `player/wbi/v2` + 字幕 CDN，失败退首屏 `__INITIAL_STATE__` |
 | 章节 / 章节截图          | 支持                   | 不支持（控件自动隐藏）              |
 | 机器翻译（中 / EN 按钮） | 仅原生轨道可保证       | 不支持；按钮只映射原生/AI 轨道      |
@@ -16,6 +16,10 @@
 | 缓存                     | `v9\|youtube\|…`        | `v9\|bilibili\|…`（两站互不相交）  |
 
 B 站字幕接口要求登录态：匿名时可能返回**空轨道列表**而不是报错，面板会明确区分「未登录」「AI 字幕生成中」和「视频没有字幕」。`-352` 是风控，需稍后重试。
+
+B 站轨道不只靠 `type` 判断来源：综合 `lan` 的 `ai-` 前缀、字幕 CDN 域名、`ai_status` / `is_ai` 等字段，并用 `view.subtitle.list` 给 `player/wbi/v2` 的轨道补线索；底栏会显示「中文（中国）（人工 / AI）」。默认优先级是**人工中文 → 人工任意 → 未知来源中文 → AI**。
+
+页面是 SSR + Vue hydration：入口按钮会等 `[data-server-rendered]` 消失后再插入 header，并用 `MutationObserver` 处理 hydration 结束与 SPA 重建，避免把 B 站原生页头冲乱。
 
 油猴产物保持 `@grant none`（一旦声明任何 `@grant`，Tampermonkey 会把脚本沙箱化，YouTube 的 `getPlayerResponse()` / fetch hook / 主动切轨全部失效）。因此 B 站走页面上下文 `fetch(..., { credentials: 'include' })`；扩展端则靠 `host_permissions` 拿 CORS 豁免。产物文件名与 `@name` 保持不变，方便已有安装直接更新。
 
@@ -32,7 +36,7 @@ B 站字幕接口要求登录态：匿名时可能返回**空轨道列表**而�
 
 ## 一个站点一个入口
 
-每个站点页面上只有**一个**按钮：YouTube 是 `Transcript`（`ytt-entry-btn`，右栏卡片），B 站是 `字幕`（`ytt-float-btn`，右下浮层）。卡片高度固定、可收起 —— YouTube 右栏本来就窄，收成一条标题栏省不下多少地方又容易和「关闭」混淆；B 站浮层则要能让出视频画面。
+每个站点页面上只有**一个**按钮和一个面板：YouTube 是 `Transcript`（`ytt-entry-btn`，masthead），B 站是 `字幕`（`ytt-float-btn`）。B 站的按钮是 `<ul class="right-entry">` 里与投稿同级的 `<li>`，插在 `.right-entry-item--upload` 前面；卡片则放在 `#mirror-vdcon > .right-container-inner`。按钮只 toggle 这张卡片，没有右栏时不弹第二界面。
 
 > **1.x 原版实现已彻底移除**（v2.23.0）。早期为了「先能跑」把旧脚本整份搬进产物，
 > 新版通过一个全局对象调它的提取函数；旧 UI 早已退役、能力也全部由 TS 承接，
@@ -151,7 +155,7 @@ npm run build:ext
 
 打开 `chrome://extensions` → 开启「开发者模式」→「加载已解压的扩展程序」→ 选择 `dist/extension`。
 
-点工具栏图标打开 Side Panel；页面上的 `Transcript` 按钮打开的是**右栏内嵌卡片**（B 站则是右下浮层），不再尝试 Side Panel（工具栏那条路径保持不变）。扩展的 host 权限覆盖 `www.youtube.com` / `www.bilibili.com` / `api.bilibili.com` 与字幕 CDN。
+点工具栏图标打开 Side Panel；页面上的按钮打开的是**右栏内嵌卡片**（两站一致），不再尝试 Side Panel（工具栏那条路径保持不变）。扩展的 host 权限覆盖 `www.youtube.com` / `www.bilibili.com` / `api.bilibili.com` 与字幕 CDN。
 
 没有右栏的页面（Shorts、极窄布局）不显示面板，按钮会短暂提示「当前页面没有右栏」并复原，不弹阻塞对话框。
 
@@ -190,7 +194,7 @@ userscript/main.ts           油猴单 world：①②③④ + UI 全在一个进
 src/core/                    平台无关：抓取链、解析、缓存、导出、store
   site/                     站点层：SiteAdapter 契约 + registry + 两个实现
     youtube.ts               YouTube：抓取链 / playerResponse / DOM / 右栏挂载
-    bilibili/                Bilibili：MD5 + WBI 签名 + 字幕 API + 页面兜底 + 浮层
+    bilibili/                Bilibili：MD5 + WBI 签名 + 字幕 API + 页面兜底；UI 复用右栏卡片
 src/platform/                session（只依赖 SiteAdapter）
   client.in-process.ts       两端共用：同进程直连 store（扩展 content + 油猴）
   client.sidepanel-chrome.ts Chrome 扩展 Side Panel 专属远程视图
@@ -205,7 +209,7 @@ src/ui/                      面板组件（双端同一份，原生 DOM）
   sidepanel.ts               唯一剩下的第二种挂载点（扩展侧栏文档）
 ```
 
-产物体积（生产 + minify，多站点之后）：油猴单文件约 132 KB / gzip 45 KB；扩展 content script 约 133 KB、侧栏 chunk 40 KB、CSS 24 KB。对比 1.x 的 14 KB 单文件，多出来的是兜底链、解析器、导出、IndexedDB 缓存、面板 UI，以及第二站点（MD5 + WBI + API + 浮层）约 8–10 KB。content script 不能代码分割，因此 B 站模块会随 YouTube 一起进包。
+产物体积（生产 + minify，多站点之后）：油猴单文件约 132 KB / gzip 45 KB；扩展 content script 约 133 KB、侧栏 chunk 40 KB、CSS 24 KB。对比 1.x 的 14 KB 单文件，多出来的是兜底链、解析器、导出、IndexedDB 缓存、面板 UI，以及第二站点（MD5 + WBI + API + 右栏挂载）约 8–10 KB。content script 不能代码分割，因此 B 站模块会随 YouTube 一起进包。
 
 ### 为什么这样拆
 

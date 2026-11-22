@@ -8,7 +8,7 @@
 
 /* ------------------------------------------------------------------ *
  * 设计令牌：面板自带一套语义变量，靠 .ytt-light 覆盖成浅色。
- * 刻意不用 `dark:` 变体 —— 两个挂载点（Side Panel 文档 / Shadow DOM 浮层）
+ * 刻意不用 `dark:` 变体 —— 两个挂载点（Side Panel 文档 / Shadow DOM 卡片）
  * 的主题载体不同，用变量 + 根节点 class 最稳。
  * ------------------------------------------------------------------ */
 /* 色彩与字体对齐 YouTube 自己的规范（dark 主题）：
@@ -96,7 +96,7 @@
   }
 }
 
-/* 细滚动条：浮层和侧栏都窄，默认滚动条太抢 */
+/* 细滚动条：页面内卡片和侧栏都窄，默认滚动条太抢 */
 .ytt-root .ytt-scroll {
   scrollbar-width: thin;
   scrollbar-color: var(--ytt-border-strong) transparent;
@@ -137,24 +137,6 @@
   .ytt-root.ytt-card {
     transition: none;
   }
-}
-
-/* ------------------------------------------------------------------ *
- * 右下浮层（variant=overlay，B 站这类没有右栏卡片的站点）
- *
- * 与右栏卡片同一套变量与行高，只改尺寸与投影：两站看起来是同一个产品。
- * 宽度给上限并留出 32px 边距，窄屏（手机版页面）也不会溢出。
- * ------------------------------------------------------------------ */
-.ytt-root.ytt-float {
-  width: min(420px, calc(100vw - 32px));
-  height: var(--ytt-card-height, min(560px, 72vh));
-  overflow: hidden;
-  border: 1px solid var(--ytt-card-border);
-  border-radius: 14px;
-  background: var(--ytt-bg);
-  box-shadow:
-    0 24px 60px -18px rgba(0, 0, 0, 0.55),
-    0 2px 8px rgba(0, 0, 0, 0.18);
 }
 
 @keyframes ytt-shimmer {

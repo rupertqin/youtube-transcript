@@ -212,7 +212,11 @@ export function createStatusBar(options: StatusBarOptions = {}): StatusBarHandle
       sourceWrap.title = state.source ? sourceHint(state.source, state.site) : '还没有抓到字幕';
       sourceIcon.style.color = state.source ? 'var(--ytt-ok)' : '';
       setText(countText, String(state.lines.length));
-      setText(langText, state.lang ?? '');
+      // B 站没有机翻，轨道名里带「人工 / AI」比裸语言码更有用
+      setText(
+        langText,
+        state.site === 'bilibili' && state.trackLabel ? state.trackLabel : (state.lang ?? ''),
+      );
       show(cacheWrap, state.cached);
       show(langText, Boolean(state.lang));
 

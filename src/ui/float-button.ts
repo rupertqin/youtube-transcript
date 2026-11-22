@@ -1,6 +1,7 @@
 import { createEntryButton } from '../core/dom/button';
 
-export const FLOAT_BUTTON_ID = 'ytt-float-btn';
+/** 历史 id，保留它避免已有用户样式失效；按钮现在挂在 B 站 header 上。 */
+export const BILI_ENTRY_BUTTON_ID = 'ytt-float-btn';
 
 export interface FloatButtonOptions {
   doc: Document;
@@ -9,22 +10,20 @@ export interface FloatButtonOptions {
 }
 
 /**
- * 浮层入口胶囊。
+ * B 站入口胶囊，与 YouTube masthead 入口同一副皮囊（`createEntryButton`）。
  *
- * 与 YouTube 的 masthead 入口同一副皮囊（`createEntryButton`），
- * 只是位置固定在右下角 —— B 站没有「右栏」这个挂载点。
+ * 位置由调用方决定：现在放进 B 站顶部导航 `<ul class="right-entry">`，
+ * 作为投稿按钮左侧的同级 `<li>`；toggle 的是右栏卡片，不是浮层面板。
  */
 export function createFloatButton(options: FloatButtonOptions): HTMLButtonElement {
   const button = createEntryButton({
     doc: options.doc,
     label: options.label,
-    id: FLOAT_BUTTON_ID,
-    title: '打开字幕面板',
+    id: BILI_ENTRY_BUTTON_ID,
+    title: '在右栏打开字幕',
     onClick: () => options.onClick(),
   });
-  // 浮在视频上：阴影要更重一点，否则在亮色画面里边界会糊掉
-  button.style.height = '38px';
-  button.style.boxShadow = '0 10px 26px -10px rgba(255,78,69,.75)';
+  button.style.height = '34px';
   button.style.pointerEvents = 'auto';
   return button;
 }

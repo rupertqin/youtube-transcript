@@ -47,6 +47,23 @@ describe('resolveSidebarMount', () => {
     expect(resolveSidebarMount(doc({ 'ytd-watch-flexy': el() }))).toBeNull();
   });
 
+  it('B 站普通 UP 主视频页：用 .right-container-inner', () => {
+    const inner = el();
+    const right = el({ '.right-container-inner': inner });
+    const vdcon = el({ '.right-container': right });
+    expect(resolveSidebarMount(doc({ '#mirror-vdcon': vdcon }))).toBe(inner);
+  });
+
+  it('B 站右栏晚到时仍能被识别', () => {
+    const right = el();
+    // #mirror-vdcon 还没渲染，但 .video-container-v1 .right-container 已在页面上
+    expect(resolveSidebarMount(doc({ '.video-container-v1 .right-container': right }))).toBe(right);
+  });
+
+  it('B 站没有右栏的布局返回 null（由适配器退回浮层）', () => {
+    expect(resolveSidebarMount(doc({ '#mirror-vdcon': el() }))).toBeNull();
+  });
+
   it('宿主 id 固定，便于重挂与排查', () => {
     expect(SIDEBAR_HOST_ID).toBe('ytt-sidebar-host');
   });
