@@ -97,6 +97,8 @@ export interface HarvestResult extends SourceOutcome {
 
 export interface PanelState {
   videoId: string;
+  /** 站点 id（'youtube' | 'bilibili'）。UI 据此决定显示哪些能力，缓存据此分段。 */
+  site: string;
   title: string;
   status: 'idle' | 'loading' | 'ready' | 'error';
   lines: TranscriptLine[];

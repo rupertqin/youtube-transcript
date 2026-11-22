@@ -40,9 +40,10 @@ export function createStore<T extends object>(initial: T): Store<T> {
   };
 }
 
-export function emptyPanelState(videoId = ''): PanelState {
+export function emptyPanelState(videoId = '', site = ''): PanelState {
   return {
     videoId,
+    site,
     title: '',
     status: 'idle',
     lines: [],

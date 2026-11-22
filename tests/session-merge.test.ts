@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { createSession, type SessionHooks } from '../src/platform/session';
+import { createSession } from '../src/platform/session';
 import type { TranscriptLine } from '../src/core/types';
+import { createFakeSite } from './fake-site';
 
 /**
  * 端到端验证「合并真的接到了界面上」。
@@ -46,7 +47,7 @@ const raw: TranscriptLine[] = [
 
 describe('会话层把 ASR 分段合并后再显示', () => {
   it('抓取结果落到 state.lines 时已是段落，诊断里能看出合并比例', async () => {
-    const hooks: SessionHooks = {
+    const site = createFakeSite({
       harvest: async () => ({
         lines: raw,
         source: 'innertube',
@@ -55,9 +56,8 @@ describe('会话层把 ASR 分段合并后再显示', () => {
         complete: true,
       }),
       title: () => 'The Daily Show',
-      storyboard: async () => null,
-    };
-    const session = createSession({ win: makeWin(), hooks });
+    });
+    const session = createSession({ win: makeWin(), site });
     session.sync();
     await session.load();
 

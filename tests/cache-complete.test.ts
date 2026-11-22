@@ -70,9 +70,12 @@ beforeEach(() => {
   store.clear();
 });
 
-function entry(overrides: Partial<CachedTranscript> = {}): Omit<CachedTranscript, 'expiresAt'> {
+function entry(
+  overrides: Partial<CachedTranscript> = {},
+): Omit<CachedTranscript, 'expiresAt'> {
   return {
-    key: cacheKey(VIDEO, 'en', 'asr'),
+    key: cacheKey('youtube', VIDEO, 'en', 'asr'),
+    site: 'youtube',
     videoId: VIDEO,
     lang: 'en',
     kind: 'asr',
@@ -87,8 +90,8 @@ function entry(overrides: Partial<CachedTranscript> = {}): Omit<CachedTranscript
 }
 
 describe('缓存可信标记', () => {
-  it('cacheKey 用 schema 8 前缀，让历史残缺缓存整体失效', () => {
-    expect(cacheKey(VIDEO, 'en', 'asr')).toBe('v8|AAAAAAAAAAA|en|asr');
+  it('cacheKey 用 schema 9 前缀 + 站点段，让历史残缺缓存整体失效', () => {
+    expect(cacheKey('youtube', VIDEO, 'en', 'asr')).toBe('v9|youtube|AAAAAAAAAAA|en|asr');
   });
 
   it('complete=false 的 DOM 预览绝不落盘', async () => {
@@ -98,7 +101,7 @@ describe('缓存可信标记', () => {
 
   it('完整结果写入后能被读回', async () => {
     await writeCache(entry());
-    const hit = await readCacheForVideo(VIDEO);
+    const hit = await readCacheForVideo('youtube', VIDEO);
     expect(hit?.videoId).toBe(VIDEO);
     expect(hit?.lines).toHaveLength(3);
     expect(hit?.complete).toBe(true);
@@ -107,13 +110,13 @@ describe('缓存可信标记', () => {
   it('库里残缺条目（旧版本留下的）不会被当成最终结果命中', async () => {
     const bad = entry({ complete: false }) as CachedTranscript;
     store.set(bad.key, { ...bad, expiresAt: Date.now() + 60_000 });
-    expect(await readCacheForVideo(VIDEO)).toBeNull();
+    expect(await readCacheForVideo('youtube', VIDEO)).toBeNull();
   });
 
   it('schema 7 的老条目一律不命中', async () => {
     const old = entry({ key: 'v7|AAAAAAAAAAA|en|asr' }) as CachedTranscript;
     store.set(old.key, { ...old, expiresAt: Date.now() + 60_000 });
-    expect(await readCacheForVideo(VIDEO)).toBeNull();
+    expect(await readCacheForVideo('youtube', VIDEO)).toBeNull();
   });
 
   it('归属守卫：播放器不在该视频上时拒绝写入', async () => {
@@ -123,7 +126,12 @@ describe('缓存可信标记', () => {
 
   it('选了中文就不会命中上次缓存的英文', async () => {
     await writeCache(entry());
-    expect(await readCacheForVideo(VIDEO, 'zh-Hans')).toBeNull();
-    expect(await readCacheForVideo(VIDEO, 'en')).not.toBeNull();
+    expect(await readCacheForVideo('youtube', VIDEO, 'zh-Hans')).toBeNull();
+    expect(await readCacheForVideo('youtube', VIDEO, 'en')).not.toBeNull();
+  });
+
+  it('归属守卫：站点不符时拒绝写入', async () => {
+    await writeCache(entry(), { site: 'bilibili' });
+    expect(store.size).toBe(0);
   });
 });

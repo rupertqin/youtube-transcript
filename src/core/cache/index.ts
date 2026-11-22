@@ -13,9 +13,12 @@ export const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
  *    单看 videoId 永远查不出来 —— 只能整体作废并靠 writeCache 的归属守卫防复发。
  * v7 同上：拦截层曾用「发请求时的地址栏」给 get_transcript 定归属，切页窗口期
  *    会把旧面板迟到的响应标成新视频，污染同样无法从 videoId 上发现。整体作废。
+ * v9 多站点：key 加站点段。YouTube 的 11 位 id 与 B 站 BV 号格式不同，
+ *    但「不同站点恰好同 id」并非不可能，且同一份 id 在不同站点的字幕完全不同，
+ *    必须在 key 层就隔开；同时让旧的多余条目一次性失效（7 天缓存可接受）。
  * 每次调整判定规则都必须抬版本，否则修好代码也会一直读到旧脏数据。
  */
-const CACHE_SCHEMA = 8;
+const CACHE_SCHEMA = 9;
 
 const DB_NAME = 'ytt-cache';
 const DB_VERSION = 1;
@@ -24,6 +27,8 @@ const STORE_EVENTS = 'events';
 
 export interface CachedTranscript {
   key: string;
+  /** 站点命名空间（'youtube' | 'bilibili'）：两站的同 id 缓存绝不互相命中 */
+  site: string;
   videoId: string;
   lang: string;
   kind: string;
@@ -39,8 +44,13 @@ export interface CachedTranscript {
   complete?: boolean;
 }
 
-export function cacheKey(videoId: string, lang?: string | null, kind?: string | null): string {
-  return `v${CACHE_SCHEMA}|${videoId}|${lang ?? 'na'}|${kind ?? 'manual'}`;
+export function cacheKey(
+  site: string,
+  videoId: string,
+  lang?: string | null,
+  kind?: string | null,
+): string {
+  return `v${CACHE_SCHEMA}|${site}|${videoId}|${lang ?? 'na'}|${kind ?? 'manual'}`;
 }
 
 function available(): boolean {
@@ -87,6 +97,7 @@ function promisify<T>(request: IDBRequest<T>): Promise<T> {
  * 不传（同音频模式）表示任何语言的条目都能用。
  */
 export async function readCacheForVideo(
+  site: string,
   videoId: string,
   preferredLang?: string | null,
 ): Promise<CachedTranscript | null> {
@@ -96,10 +107,11 @@ export async function readCacheForVideo(
     const tx = db.transaction(STORE_TRANSCRIPTS, 'readonly');
     const all = await promisify(tx.objectStore(STORE_TRANSCRIPTS).getAll() as IDBRequest<CachedTranscript[]>);
     const now = Date.now();
-    const prefix = `v${CACHE_SCHEMA}|`;
+    const prefix = `v${CACHE_SCHEMA}|${site}|`;
     const hit = all
       .filter(
         (entry) =>
+          entry.site === site &&
           entry.videoId === videoId &&
           (!preferredLang || entry.lang === preferredLang) &&
           entry.key.startsWith(prefix) &&
@@ -147,8 +159,8 @@ async function drop(key: string): Promise<void> {
  * 条目，之后每次命中都拿到别人的字幕，而且永远查不出原因。
  */
 export async function writeCache(
-  entry: Omit<CachedTranscript, 'expiresAt'>,
-  guard?: { playerVideoId?: string | null },
+  entry: Omit<CachedTranscript, 'expiresAt' | 'key'>,
+  guard?: { site?: string; playerVideoId?: string | null },
 ): Promise<void> {
   if (!available()) return;
   // DOM 预览只有视口里的几十行，写进去就会把「缺前段」固化 7 天
@@ -166,13 +178,17 @@ export async function writeCache(
     console.warn('[ytt] skip caching: content belongs to another video', declared, entry.videoId);
     return;
   }
+  if (guard?.site && guard.site !== entry.site) {
+    console.warn('[ytt] skip caching: content belongs to another site', guard.site, entry.site);
+    return;
+  }
   try {
     const db = await openDb();
     const tx = db.transaction(STORE_TRANSCRIPTS, 'readwrite');
     // key 统一由 cacheKey 生成，避免调用方各写一套格式
     tx.objectStore(STORE_TRANSCRIPTS).put({
       ...entry,
-      key: cacheKey(entry.videoId, entry.lang, entry.kind),
+      key: cacheKey(entry.site, entry.videoId, entry.lang, entry.kind),
       expiresAt: Date.now() + CACHE_TTL_MS,
     });
   } catch (error) {

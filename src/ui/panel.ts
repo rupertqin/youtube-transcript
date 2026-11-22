@@ -10,6 +10,8 @@ import {
   toPlainText,
 } from '../core/format/export';
 import { formatCopyText } from '../core/format/copy';
+import { capabilitiesOf } from '../core/site/registry';
+import type { SiteCapabilities } from '../core/site/types';
 import { frameAt } from '../core/storyboard';
 import type { ExportFormat, PanelState, TranscriptLine } from '../core/types';
 import type { TranscriptClient } from '../platform/types';
@@ -51,6 +53,11 @@ export interface PanelOptions {
    * 「切页后一直显示上一个视频」这种可能。
    */
   currentVideoId?: () => string | null;
+  /**
+   * 站点能力。不传就按 `state.site` 查静态表 ——
+   * 扩展侧栏拿不到 adapter 实例，只能靠状态里的站点 id 推。
+   */
+  capabilities?: SiteCapabilities | (() => SiteCapabilities);
 }
 
 /**
@@ -91,6 +98,13 @@ export function createPanel(options: PanelOptions): PanelHandle {
   const { client, variant, onClose, currentVideoId } = options;
 
   let state: PanelState = client.getState();
+
+  /** 站点能力：静态注入优先，否则按状态里的站点查表（侧栏 / 浮层都走这条） */
+  const caps = (): SiteCapabilities => {
+    const preset = options.capabilities;
+    if (typeof preset === 'function') return preset();
+    return preset ?? capabilitiesOf(state.site);
+  };
   let needle = '';
   let cursor = 0;
   let copied = false;
@@ -357,6 +371,8 @@ export function createPanel(options: PanelOptions): PanelHandle {
       timestampsAvailable: viewRows().some((line) => line.start >= 0),
       view: currentView(),
       chaptersAvailable: state.chapters.length > 0,
+      canChapters: caps().chapters,
+      machineTranslate: caps().machineTranslate,
       // 视频给不了所选语言时按「同音频」显示：按钮不选中，与实际抓取行为一致
       lang: pickUsableChoice(getPrefs().lang, state.availableLangs),
       // 中/英都没有就整组隐藏；有哪个就哪个可点，缺的那个置灰
@@ -415,6 +431,7 @@ export function createPanel(options: PanelOptions): PanelHandle {
     emptyHost.appendChild(
       renderEmptyState({
         kind,
+        site: state.site,
         code: state.error?.code ?? null,
         detail: state.error?.detail,
         needle,

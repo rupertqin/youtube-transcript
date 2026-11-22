@@ -21,7 +21,8 @@ export interface BridgeEndpoint {
 }
 
 /**
- * MAIN world 与 ISOLATED world 之间的最小 RPC（window.postMessage）。
+ * Chrome 扩展专属：MAIN world 与 ISOLATED world 之间的最小 RPC（window.postMessage）。
+ * 油猴脚本运行在页面上下文，同进程直连，不需要这个文件。
  * 只认本通道 + 同源 source，避免和其他扩展/页脚脚本串台。
  */
 export function createBridgeEndpoint(win: Window): BridgeEndpoint {

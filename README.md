@@ -1,6 +1,23 @@
-# YouTube Transcript Studio
+# Transcript Studio（YouTube / Bilibili）
 
-一个常驻的 YouTube 字幕工作台，同时产出 **Chrome MV3 扩展** 与 **Tampermonkey 脚本**，两端共享同一套核心代码与 UI。
+一个常驻的字幕工作台，同时产出 **Chrome MV3 扩展** 与 **Tampermonkey 脚本**，两端共享同一套核心代码与 UI。
+
+## 多站点
+
+同一套面板在 **YouTube** 和 **哔哩哔哩** 上都能用；打开对应视频页自动生效，不支持的页面不注入任何按钮。
+
+| 能力                     | YouTube                | Bilibili                           |
+| ------------------------ | ---------------------- | ---------------------------------- |
+| 入口 / 面板              | masthead 按钮 + 右栏卡片 | 右下胶囊按钮 + 浮层卡片             |
+| 抓取                     | playerResponse / InnerTube / get_panel / DOM / timedtext 拦截 | WBI 签名的 `player/wbi/v2` + 字幕 CDN，失败退首屏 `__INITIAL_STATE__` |
+| 章节 / 章节截图          | 支持                   | 不支持（控件自动隐藏）              |
+| 机器翻译（中 / EN 按钮） | 仅原生轨道可保证       | 不支持；按钮只映射原生/AI 轨道      |
+| 分 P / 分集              | 不适用                 | `BV…:p{n}` 独立缓存，切集自动跟随   |
+| 缓存                     | `v9\|youtube\|…`        | `v9\|bilibili\|…`（两站互不相交）  |
+
+B 站字幕接口要求登录态：匿名时可能返回**空轨道列表**而不是报错，面板会明确区分「未登录」「AI 字幕生成中」和「视频没有字幕」。`-352` 是风控，需稍后重试。
+
+油猴产物保持 `@grant none`（一旦声明任何 `@grant`，Tampermonkey 会把脚本沙箱化，YouTube 的 `getPlayerResponse()` / fetch hook / 主动切轨全部失效）。因此 B 站走页面上下文 `fetch(..., { credentials: 'include' })`；扩展端则靠 `host_permissions` 拿 CORS 豁免。产物文件名与 `@name` 保持不变，方便已有安装直接更新。
 
 - 页面标题栏出现 `Transcript` 入口，点开是**嵌进观看页右栏的卡片**（相关视频上方，随页面滚动，不遮挡视频）；无右栏的页面只给按钮提示。扩展仍可用工具栏开 Side Panel
 - 切到另一个视频时面板不关，自动换成当前视频的字幕与章节；不会残留上一个视频的内容（判据是**内容指纹**，见下文「切页」）
@@ -13,10 +30,9 @@
 - 完整结构化字幕源优先的抓取兜底链 + 失败分类，抓一次缓存 7 天
 - ASR 碎片按「约 8 秒一行」合并成段落（与 YouTube 原生面板分组一致），显示 / 搜索 / 复制 / 导出共用同一份
 
-## 一个产物，一个入口
+## 一个站点一个入口
 
-页面上只有**一个**按钮 `Transcript`（`ytt-entry-btn`），点开是右栏卡片。卡片固定高度、
-不可收起 —— 右栏本来就窄，收成一条标题栏既省不下多少地方，又容易和「关闭」混淆。
+每个站点页面上只有**一个**按钮：YouTube 是 `Transcript`（`ytt-entry-btn`，右栏卡片），B 站是 `字幕`（`ytt-float-btn`，右下浮层）。卡片高度固定、可收起 —— YouTube 右栏本来就窄，收成一条标题栏省不下多少地方又容易和「关闭」混淆；B 站浮层则要能让出视频画面。
 
 > **1.x 原版实现已彻底移除**（v2.23.0）。早期为了「先能跑」把旧脚本整份搬进产物，
 > 新版通过一个全局对象调它的提取函数；旧 UI 早已退役、能力也全部由 TS 承接，
@@ -135,7 +151,7 @@ npm run build:ext
 
 打开 `chrome://extensions` → 开启「开发者模式」→「加载已解压的扩展程序」→ 选择 `dist/extension`。
 
-点工具栏图标打开 Side Panel；页面上的 `Transcript` 按钮打开的是**右栏内嵌卡片**，不再尝试 Side Panel（工具栏那条路径保持不变）。
+点工具栏图标打开 Side Panel；页面上的 `Transcript` 按钮打开的是**右栏内嵌卡片**（B 站则是右下浮层），不再尝试 Side Panel（工具栏那条路径保持不变）。扩展的 host 权限覆盖 `www.youtube.com` / `www.bilibili.com` / `api.bilibili.com` 与字幕 CDN。
 
 没有右栏的页面（Shorts、极窄布局）不显示面板，按钮会短暂提示「当前页面没有右栏」并复原，不弹阻塞对话框。
 
@@ -145,7 +161,7 @@ npm run build:ext
 npm run build:userscript
 ```
 
-把 `dist/userscript/youtube-transcript.user.js` 拖进 Tampermonkey 的安装页（或直接打开该文件）。脚本 `@grant none`，本身运行在页面上下文，不需要任何 GM\_ API。
+把 `dist/userscript/youtube-transcript.user.js` 拖进 Tampermonkey 的安装页（或直接打开该文件）。meta 头同时 `@match` 了 YouTube 与 Bilibili，文件名和 `@name` 保持不变（已有安装可直接更新）。脚本 `@grant none`，本身运行在页面上下文，不需要任何 GM\_ API。
 
 ## 开发
 
@@ -162,7 +178,7 @@ npm run zip              # 打包扩展 zip
 
 ## 架构
 
-核心思路：**抓取层对 world 无感知，UI 层对平台无感知**，两端差异只落在各自的入口与适配器里。
+核心思路：**抓取层对 world 无感知，UI 层对平台无感知，会话层对站点无感知**。两端差异落在各自的入口；站点差异落在 `SiteAdapter`；`platform/session.ts` 只认契约。
 
 ```
 entrypoints/                 扩展端（Chrome MV3）
@@ -172,7 +188,14 @@ entrypoints/                 扩展端（Chrome MV3）
 └── sidepanel/               Side Panel（同一份 Panel 组件）
 userscript/main.ts           油猴单 world：①②③④ + UI 全在一个进程
 src/core/                    平台无关：抓取链、解析、缓存、导出、store
-src/platform/                session / bridge RPC / local+remote client
+  site/                     站点层：SiteAdapter 契约 + registry + 两个实现
+    youtube.ts               YouTube：抓取链 / playerResponse / DOM / 右栏挂载
+    bilibili/                Bilibili：MD5 + WBI 签名 + 字幕 API + 页面兜底 + 浮层
+src/platform/                session（只依赖 SiteAdapter）
+  client.in-process.ts       两端共用：同进程直连 store（扩展 content + 油猴）
+  client.sidepanel-chrome.ts Chrome 扩展 Side Panel 专属远程视图
+  bridge.chrome-main-world.ts Chrome 扩展 MAIN↔ISOLATED RPC（油猴不需要）
+  protocol.ts / types.ts     消息类型与 TranscriptClient 定义
 src/ui/                      面板组件（双端同一份，原生 DOM）
   dom.ts                      el() 构造器、显隐、二分查找等基础件
   panel.ts                   面板骨架 + 状态派发 + 播放跟随
@@ -182,7 +205,7 @@ src/ui/                      面板组件（双端同一份，原生 DOM）
   sidepanel.ts               唯一剩下的第二种挂载点（扩展侧栏文档）
 ```
 
-产物体积（生产 + minify）：油猴单文件 73 KB / gzip 24 KB；扩展 content script 68 KB、侧栏 chunk 27 KB、CSS 23 KB。对比 1.x 的 14 KB 单文件，多出来的部分是兜底链、解析器、导出、IndexedDB 缓存与整个面板 UI。
+产物体积（生产 + minify，多站点之后）：油猴单文件约 132 KB / gzip 45 KB；扩展 content script 约 133 KB、侧栏 chunk 40 KB、CSS 24 KB。对比 1.x 的 14 KB 单文件，多出来的是兜底链、解析器、导出、IndexedDB 缓存、面板 UI，以及第二站点（MD5 + WBI + API + 浮层）约 8–10 KB。content script 不能代码分割，因此 B 站模块会随 YouTube 一起进包。
 
 ### 为什么这样拆
 
@@ -370,6 +393,8 @@ InnerTube 探不到轨道，而页面上躺着 376 行完整字幕。现在这�
 
 工具栏上是**两个独立按钮**：`中` 和 `EN`。
 
+> B 站没有机器翻译：这两个按钮只用来挑**已有的轨道**。`ai-zh` 归为 `zh-Hans`、`ai-en` 归为 `en`，`type===0` 的投稿字幕优先于 AI 字幕；目标语言不存在时退回分数最高的那条（显示原文），缺语言按钮的提示会注明「该站点不支持机器翻译」。可用轨道来自 WBI 接口，抓取完成后由站点适配器同步给会话层。
+
 - **都不选中 = 同音频**（默认）：不翻译，用视频自己的字幕轨道（通常是 ASR 原声）。
 - 选中某个语言就切过去；**再点一次已选中的按钮**回到同音频。
 
@@ -429,7 +454,7 @@ videoId   B  ✓ 与当前页一致
 
 四道防线：
 
-1. **整体作废**：`CACHE_SCHEMA` 抬到 **8**，旧条目全部失效（键前缀变了）。v6 清的是 DOM 串页写坏的条目，v7 清的是拦截层归属错误写坏的条目，**v8 清的是「只含视口几十行」的残缺 DOM 结果** —— 那正是「点清空缓存并重新抓取才拿到全部字幕」的原因。
+1. **整体作废**：`CACHE_SCHEMA` 抬到 **9**，旧条目全部失效（键前缀变了）。v6 清的是 DOM 串页写坏的条目，v7 清的是拦截层归属错误写坏的条目，v8 清的是「只含视口几十行」的残缺 DOM 结果，**v9 给 key 加站点段**，让 YouTube 与 B 站的同 id 条目彻底隔开。
 2. **完整性标记** `SourceOutcome.complete` / `CachedTranscript.complete`：DOM 预览 `complete: false`，`writeCache()` 直接拒写，`readCacheForVideo()` 也只返回 `complete !== false` 的条目。缓存里存的是**清洗后的原始分段**，展示时才做句子合并，避免命中缓存时二次合并把行越粘越长。
 3. **写入守卫** `writeCache(entry, { playerVideoId })`：抓取当时播放器不在 `entry.videoId` 上就拒绝写入。
 4. **读取时做物理一致性校验**：`transcriptFitsDuration(lines, duration)` —— 字幕最后一条不可能晚于视频结束（留 60s 容差）。这条判据与 videoId 无关，所以能揪出「id 对、内容错」的条目，命中即删除并改为现抓。
@@ -452,7 +477,7 @@ videoId   B  ✓ 与当前页一致
 
 ### 缓存
 
-`IndexedDB`（库名 `ytt-cache`），key = `v8|videoId|lang|kind`，TTL 7 天；同一视频切来切去不会重复请求，降低被限流概率。只缓存完整结构化结果。
+`IndexedDB`（库名 `ytt-cache`），key = `v9|site|videoId|lang|kind`，TTL 7 天；同一视频切来切去不会重复请求，降低被限流概率。只缓存完整结构化结果。`site` 段由 `SiteAdapter.cacheNamespace` 提供，B 站 videoId 带分 P（`BV…:p2`）。
 
 ### 句子合并
 

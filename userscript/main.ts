@@ -1,205 +1,73 @@
 import panelCss from '../src/ui/styles.css?inline';
-import { ensureEntryButton, flashEntryButton, removeEntryButton } from '../src/core/dom/button';
-import { readDomPreview, readRenderedTranscript } from '../src/core/dom/native-panel';
-import { closeTranscriptPanelIfOurs, ensureFreshTranscriptRequest } from '../src/core/dom/panel';
 import { installShadowCapture } from '../src/core/dom/shadow';
-import { harvestTranscript } from '../src/core/harvest/chain';
-import { fetchPanelTranscript } from '../src/core/harvest/get-panel';
 import { installTimedTextHook } from '../src/core/harvest/intercept';
-import { interceptWithAutoSwitch } from '../src/core/harvest/player-track';
-import {
-  hasNativeTrackFor,
-  readAvailableLangs,
-  readPlayerResponse,
-  readTitleFor,
-  readVideoId,
-} from '../src/core/harvest/player';
-import { runInterceptSource, runRemoteSources } from '../src/core/harvest/sources';
-import { langMatches, pickUsableChoice, resolveLangPlan } from '../src/core/langs';
 import { log } from '../src/core/log';
-import { createLocalClient } from '../src/platform/local-client';
+import { readBiliPageState } from '../src/core/site/bilibili/page-state';
+import { createSite } from '../src/core/site/create';
+import { siteIdOf } from '../src/core/site/registry';
+import { createLocalClient } from '../src/platform/client.in-process';
 import { createSession } from '../src/platform/session';
 import { getPrefs } from '../src/ui/prefs';
-import type { SourceOutcome } from '../src/core/types';
-import { createSidebarPanel } from '../src/ui/sidebar';
 
 /**
  * 油猴入口：`@grant none` 让脚本本身就跑在页面上下文，
- * 所以 ①②③④ 全在同一个进程里，不需要 MAIN/ISOLATED 消息桥。
- * 这也是「共享核心」能成立的关键 —— core 的每一层只认传入的 window。
+ * 所以不需要 MAIN/ISOLATED 消息桥 —— 站点适配器里那两条通路（直连 / 过桥）
+ * 会自动走「直连」分支。
+ *
+ * 站点差异全部在 `createSite` 之后：这里既不知道 YouTube 的 `#movie_player`，
+ * 也不知道 B 站的 WBI。
  */
 (() => {
   'use strict';
 
   const win = window;
-  installShadowCapture(window);
-  const hook = installTimedTextHook(win);
+  // 不认识的站点：一个按钮都不注入
+  const siteId = siteIdOf(win.location);
+  if (!siteId) return;
 
-  // 每次抓取时现读偏好：用户中途切成中文，下一次 load 立刻生效。
-  // 视频给不了所选语言时按「同音频」处理 —— 和按钮的禁用状态保持一致。
-  const langPlan = () => {
-    const available = readAvailableLangs(win, readVideoId(win) ?? undefined);
-    return resolveLangPlan(pickUsableChoice(getPrefs().lang, available));
-  };
+  if (siteId === 'youtube') {
+    installShadowCapture(window);
+  }
+  // timedtext 的 fetch/XHR hook 只服务 YouTube：在别的站点装它只是白白 patch
+  const hook = siteId === 'youtube' ? installTimedTextHook(win) : null;
 
-  const session = createSession({
+  const site = createSite({
     win,
-    hooks: {
-      // 标题按 videoId 取：对不上 playerResponse 就退回 document.title，
-      // 避免出现「新字幕配旧标题」
-      title: (videoId) => readTitleFor(win, videoId),
-      langPlan,
-      harvest: (videoId, signal, onStage, options) => {
-        const plan = langPlan();
-        // 没有目标语言的原生轨道时，拦截层/结构化源只能给原文 —— 必须让远程先上
-        const needsTranslation = Boolean(plan.tlang) && !hasNativeTrackFor(win, plan.tlang!);
-        const ctx = {
-          videoId,
-          langs: plan.langs,
-          tlang: plan.tlang,
-          // 面板捕获永远是默认轨道：判断「语言未知的捕获能否满足需求」要用它
-          defaultLang: readPlayerResponse(win)?.videoDetails?.defaultAudioLanguage ?? null,
-          signal,
-          log,
-        };
-
-        const domOptions = () => ({
-          videoId,
-          skipSnapshot: options?.staleRisk,
-          avoidSignature: options?.avoid ?? null,
-        });
-        // 页面已渲染的字幕：先当临时预览，所有完整源都失败时再当兜底（不进缓存）
-        const readRendered = (): SourceOutcome | null => {
-          const result = readDomPreview(document, domOptions());
-          if (result.lines.length === 0) return null;
-          return {
-            lines: result.lines,
-            source: 'dom',
-            showTimestamps: result.showTimestamps,
-            complete: false,
-          };
-        };
-        // 兜底要读全：在面板自己的滚动容器里从头滚到底，攒齐所有行
-        const readRenderedFull = async (): Promise<SourceOutcome | null> => {
-          const result = await readRenderedTranscript(document, domOptions());
-          if (result.lines.length === 0) return null;
-          return {
-            lines: result.lines,
-            source: 'dom',
-            showTimestamps: result.showTimestamps,
-            complete: false,
-          };
-        };
-
-        return harvestTranscript({
-          signal,
-          log,
-          onStage,
-          preferRemote: needsTranslation,
-          remote: () => runRemoteSources({ win, ctx }),
-          cachedIntercept: () => runInterceptSource(ctx, hook, 0),
-          // 主路径：一次 get_panel 拿回全部分段，不碰虚拟列表
-          structured: async () => {
-            // 不再因为「选了目标语言」就整条跳过：视频本身有该语言轨道时，
-            // 这条路既快又完整。拿到结果再按语言过滤（要翻译时只认目标语言）。
-            const outcome = await fetchPanelTranscript({
-              win,
-              fetchFn: win.fetch.bind(win),
-              videoId,
-              signal,
-              timeoutMs: 6_000,
-            });
-            if (!outcome || outcome.lines.length === 0) return null;
-            // 面板永远只给视频**默认轨道**（params 里没有语言位，实测加不进去）。
-            // 用户指定了别的语言时，拿它顶就是「切中文显示英文」，而且状态是 ready，
-            // 用户完全看不出哪里不对 —— 宁可失败，让拦截层去等用户切一次 CC 语言。
-            if (plan.tlang && outcome.lang && !langMatches(outcome.lang, plan.tlang)) {
-              throw Object.assign(
-                new Error(
-                  `get_panel 只给默认轨 ${outcome.lang}，要的是 ${plan.tlang}；` +
-                    '在播放器里把字幕语言切成目标语言后点重试',
-                ),
-                { code: 'NO_CAPTION_TRACK' as const },
-              );
-            }
-            return {
-              lines: outcome.lines,
-              source: 'innertube',
-              track: outcome.lang
-                ? { baseUrl: `structured:${videoId}`, languageCode: outcome.lang }
-                : undefined,
-              showTimestamps: true,
-              complete: true,
-            };
-          },
-          // 只是让屏幕上先有字：一次同步扫描，不点击、不等待、不滚动
-          domPreview: readRendered,
-          // 兜底要读全：虚拟列表只渲染视口附近的行，同步读一次会漏前段
-          domFallback: readRenderedFull,
-          onPreview: options?.onPreview,
-          // CC 关着时播放器根本不发 timedtext（这一层就没东西可截）；
-          // 但原生面板走的是 get_panel，和 CC 无关 —— 逼它重新发一次请求，
-          // hook 截下来的是**完整响应**（不是虚拟列表那几十行），抓完由 finally 收起。
-          intercept: async (timeoutMs) => {
-            // 指定了产出语言时不点面板：面板永远只给默认轨，点开只会闪一下然后
-            // 被语言检查拒掉。这时要等的是带 POT 的 timedtext 捕获。
-            if (!plan.tlang) {
-              await ensureFreshTranscriptRequest(document, { timeoutMs: 1_200 }).catch(
-                () => null,
-              );
-            }
-            // 先白嫖已有捕获；没有再（可选）主动切一次 CC 轨道去截
-            return interceptWithAutoSwitch({
-              win,
-              hook,
-              ctx,
-              timeoutMs,
-              enabled: getPrefs().autoSwitchTrack,
-            });
-          },
-          // 只收我们自己点开的面板：用户手动开的不动（否则会看到「字幕框闪一下」）
-          closePanel: () => closeTranscriptPanelIfOurs(document),
-        });
-      },
-    },
+    doc: document,
+    log,
+    hook,
+    // 每次抓取时现读偏好：用户中途切成中文，下一次 load 立刻生效
+    readChoice: () => getPrefs().lang,
+    autoSwitchTrack: () => getPrefs().autoSwitchTrack,
+    // 油猴在页面上下文，首屏状态直接读
+    readPageState: async () => readBiliPageState(win),
   });
+  if (!site) return;
 
+  const session = createSession({ win, site });
   const client = createLocalClient({
     store: session.store,
     load: session.load,
     seek: session.seek,
   });
 
-  // 面板不再是浮层：嵌进观看页右栏，跟着页面滚动
-  const sidebar = createSidebarPanel({ doc: document, css: panelCss, client });
-
-  const refreshButton = async (): Promise<void> => {
-    if (!readVideoId(win)) {
-      removeEntryButton(document);
-      return;
-    }
-    await ensureEntryButton({
-      doc: document,
-      label: 'Transcript',
-      title: '在右栏打开字幕',
-      onClick: () => {
-        if (sidebar.isOpen()) {
-          sidebar.hide();
-          return;
-        }
-        // 没有右栏（Shorts 等）时不打开任何浮层，只在按钮上提示一下
-        if (!sidebar.show()) flashEntryButton(document, '当前页面没有右栏');
-      },
-    });
-  };
+  // 挂载点由站点决定：YouTube = 右栏卡片 + masthead 按钮，B 站 = 右下浮层
+  const panel = site.mount({
+    doc: document,
+    css: panelCss,
+    client,
+    currentVideoId: () => site.videoIdOf(win.location),
+  });
 
   // 用户手动点开 YouTube 的 Transcript 标签页时，页面会自己发 get_panel。
-  // 截获后立刻自动重载，不需要再点「重试」。
-  hook.onCapture((capture) => {
-    if (capture.kind !== 'get_panel' && capture.kind !== 'get_transcript') return;
-    if (session.store.getState().status !== 'error') return;
-    void session.load(true);
-  });
+  // 截获后立刻自动重载，不需要再点「重试」。（B 站没有这条通路）
+  if (hook) {
+    hook.onCapture((capture) => {
+      if (capture.kind !== 'get_panel' && capture.kind !== 'get_transcript') return;
+      if (session.store.getState().status !== 'error') return;
+      void session.load(true);
+    });
+  }
 
   let lastUrl = '';
 
@@ -211,10 +79,10 @@ import { createSidebarPanel } from '../src/ui/sidebar';
     // 这个 URL 标记成「已处理」，此后每次 tick 都在第一行 return，面板
     // 会永久冻结在旧视频上（这正是「标题也不变」的来源）。
     try {
-      // 切页不再关面板：右栏被 YouTube 重建时自动挂回去，保持展开
-      sidebar.ensureMounted();
+      // 切页不再关面板：宿主被站点重建时自动挂回去，保持展开
+      panel.ensureMounted();
     } catch (error) {
-      log({ code: 'UNKNOWN', source: 'host', detail: `sidebar remount failed: ${String(error)}` });
+      log({ code: 'UNKNOWN', source: 'host', detail: `panel remount failed: ${String(error)}` });
     }
 
     try {
@@ -223,7 +91,6 @@ import { createSidebarPanel } from '../src/ui/sidebar';
       log({ code: 'UNKNOWN', source: 'host', detail: `session sync failed: ${String(error)}` });
     }
 
-    void refreshButton();
     lastUrl = location.href;
   };
 

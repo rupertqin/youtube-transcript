@@ -34,24 +34,16 @@ function buildIcon(doc: Document): SVGSVGElement {
 }
 
 /**
- * 页面入口按钮：挂在 masthead 的 #end 区域，和现有脚本位置保持一致。
- * 用内联样式，避免 YouTube 全局 CSS 干扰。
+ * 造一个入口按钮，**不挂载**。
+ *
+ * 拆出来是因为两个挂载点需要同一副皮囊：YouTube 挂 masthead（`ensureEntryButton`），
+ * B 站挂在右下浮层里（`ui/float.ts`）。样式全内联 —— 两个站点的全局 CSS 都很凶。
  */
-export async function ensureEntryButton(options: EntryButtonOptions): Promise<HTMLElement | null> {
+export function createEntryButton(options: EntryButtonOptions): HTMLButtonElement {
   const { doc, label = 'Transcript', onClick, id = ENTRY_BUTTON_ID } = options;
   const version = typeof __YTT_VERSION__ === 'string' ? __YTT_VERSION__ : 'dev';
   const title = options.title ?? `打开字幕面板 · v${version}`;
   const badgeText = options.badge === undefined ? `v${version}` : options.badge;
-  const selectors = getSelectors();
-
-  let anchor: Element;
-  try {
-    anchor = await waitForElement(doc, selectors.mastheadEnd, 8000);
-  } catch {
-    return null;
-  }
-
-  doc.getElementById(id)?.remove();
 
   const button = doc.createElement('button');
   button.id = id;
@@ -62,21 +54,18 @@ export async function ensureEntryButton(options: EntryButtonOptions): Promise<HT
     'display:inline-flex',
     'align-items:center',
     'gap:6px',
-    'margin-left:10px',
     'height:34px',
     'padding:0 12px',
     'border:1px solid rgba(255,255,255,0.14)',
     'border-radius:999px',
     'background:linear-gradient(135deg,#ff4e45,#ff7a45)',
     'color:#fff',
-    // 与 YouTube 自身的按钮排版一致，别让入口按钮一眼看出是外挂
     'font-family:Roboto,Arial,sans-serif',
     'font-size:14px',
     'font-weight:500',
     'cursor:pointer',
     'box-shadow:0 2px 10px rgba(255,78,69,.28)',
     'transition:transform .16s ease,box-shadow .16s ease,filter .16s ease',
-    'align-self:center',
   ].join(';');
 
   button.appendChild(buildIcon(doc));
@@ -111,6 +100,32 @@ export async function ensureEntryButton(options: EntryButtonOptions): Promise<HT
     onClick(event);
   });
 
+  return button;
+}
+
+/**
+ * 页面入口按钮：挂在 masthead 的 #end 区域，和现有脚本位置保持一致。
+ * 用内联样式，避免 YouTube 全局 CSS 干扰。
+ */
+export async function ensureEntryButton(
+  options: EntryButtonOptions & { marginLeft?: string },
+): Promise<HTMLElement | null> {
+  const { doc, id = ENTRY_BUTTON_ID } = options;
+  const selectors = getSelectors();
+
+  let anchor: Element;
+  try {
+    anchor = await waitForElement(doc, selectors.mastheadEnd, 8000);
+  } catch {
+    return null;
+  }
+
+  doc.getElementById(id)?.remove();
+
+  const button = createEntryButton(options);
+  // 与 YouTube 自身按钮排版一致：右侧留出与相邻图标的间距
+  button.style.marginLeft = options.marginLeft ?? '10px';
+  button.style.alignSelf = 'center';
   anchor.appendChild(button);
   return button;
 }
@@ -135,7 +150,7 @@ export function flashEntryButton(doc: Document, message: string, ms = 2000): voi
   }, ms);
 }
 
-export function removeEntryButton(doc: Document): void {
-  // 页面上只有这一个入口按钮
-  doc.getElementById(ENTRY_BUTTON_ID)?.remove();
+/** 按 id 移除入口按钮（浮层按钮的 id 与 masthead 的不同）。 */
+export function removeEntryButton(doc: Document, id: string = ENTRY_BUTTON_ID): void {
+  doc.getElementById(id)?.remove();
 }

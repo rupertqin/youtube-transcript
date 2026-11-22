@@ -1,5 +1,5 @@
 import '../../src/ui/styles.css';
-import { createRemoteClient } from '../../src/platform/remote-client';
+import { createRemoteClient } from '../../src/platform/client.sidepanel-chrome';
 import { getPrefs, loadPrefs, resolveTheme, subscribePrefs } from '../../src/ui/prefs';
 import { mountSidePanel } from '../../src/ui/sidepanel';
 

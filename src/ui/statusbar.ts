@@ -1,14 +1,14 @@
 import type { FailureRecord, PanelState, SourceName } from '../core/types';
 import { clear, h, setText, show } from './dom';
 import { icon } from './icons';
-import { SOURCE_HINT, SOURCE_LABEL } from './labels';
+import { sourceHint, sourceLabel } from './labels';
 
 /** 一次就命中时，说清楚是哪一层命中的（链路顺序：DOM → 拦截 → 播放器）。 */
 const SOURCE_HIT_TEXT: Record<SourceName, string> = {
   dom: 'DOM 层直接命中：读的是页面上已渲染的原生面板，那一下不发任何请求。',
-  player: '播放器层直接命中：用的是播放器响应里的字幕轨道。',
-  intercept: '拦截层直接命中：用的是 YouTube 自己发出的字幕请求结果。',
-  innertube: 'InnerTube 层直接命中：播放器响应不可用，重新探测拿到了轨道。',
+  player: '播放器层直接命中：用的是播放器自带的字幕轨道。',
+  intercept: '拦截层直接命中：用的是站点自己发出的字幕请求结果。',
+  innertube: '结构化层直接命中：播放器不可用时，改走站内接口拿到了轨道。',
 };
 
 export interface StatusBarOptions {
@@ -107,9 +107,9 @@ export function createStatusBar(options: StatusBarOptions = {}): StatusBarHandle
       row(
         '来源',
         state.cached
-          ? `${state.source ? SOURCE_LABEL[state.source] : '未知'}（缓存命中）`
+          ? `${state.source ? sourceLabel(state.source, state.site) : '未知'}（缓存命中）`
           : state.source
-            ? SOURCE_LABEL[state.source]
+            ? sourceLabel(state.source, state.site)
             : '未抓取',
       ),
     );
@@ -181,7 +181,8 @@ export function createStatusBar(options: StatusBarOptions = {}): StatusBarHandle
 
     const list = h('ul', { class: 'space-y-1' });
     for (const failure of failures) {
-      const source = SOURCE_LABEL[failure.source as SourceName] ?? failure.source;
+      const source =
+        failure.source === 'cache' ? failure.source : sourceLabel(failure.source as SourceName, state.site);
       list.appendChild(
         h('li', { class: 'flex items-start gap-2 text-[12px] leading-snug' }, [
           h('span', { class: 'w-[52px] shrink-0 text-[var(--ytt-text-mute)]', text: source }),
@@ -206,9 +207,9 @@ export function createStatusBar(options: StatusBarOptions = {}): StatusBarHandle
   return {
     element,
     update(state, pageVideoId = null) {
-      setText(sourceText, state.source ? SOURCE_LABEL[state.source] : '未抓取');
+      setText(sourceText, state.source ? sourceLabel(state.source, state.site) : '未抓取');
       // `DOM` 这类缩写只在悬停时解释一句，省得去翻文档
-      sourceWrap.title = state.source ? SOURCE_HINT[state.source] : '还没有抓到字幕';
+      sourceWrap.title = state.source ? sourceHint(state.source, state.site) : '还没有抓到字幕';
       sourceIcon.style.color = state.source ? 'var(--ytt-ok)' : '';
       setText(countText, String(state.lines.length));
       setText(langText, state.lang ?? '');

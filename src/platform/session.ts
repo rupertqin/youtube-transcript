@@ -1,20 +1,11 @@
 import { dropCacheEntry, readCacheForVideo, writeCache } from '../core/cache';
-import type { LangPlan } from '../core/langs';
 import { findActiveIndex, mergeFragments, transcriptFitsDuration } from '../core/lines';
 import { log } from '../core/log';
 import { createStore, emptyPanelState, type Store } from '../core/store';
 import type { ErrorCode, HarvestResult, PanelState, TranscriptLine } from '../core/types';
-import { getDomDiagnostic } from '../core/dom/native-panel';
-import { cleanLines, readChapters } from '../core/format/copy';
+import { cleanLines } from '../core/format/copy';
 import { contentSignature } from '../core/format/fingerprint';
-import {
-  readAvailableLangs,
-  readPlayerVideoId,
-  readStoryboardSpec,
-  readVideoDuration,
-  readVideoId,
-} from '../core/harvest/player';
-import { closeTranscriptPanelIfOurs } from '../core/dom/panel';
+import type { SiteAdapter, SiteHarvestOptions } from '../core/site/types';
 
 /** 每一层兜底对应的用户可读提示（面板加载态里显示）。 */
 const STAGE_TEXT: Record<'player' | 'innertube' | 'intercept' | 'dom' | 'panel', string> = {
@@ -25,47 +16,16 @@ const STAGE_TEXT: Record<'player' | 'innertube' | 'intercept' | 'dom' | 'panel',
   dom: '读取已渲染的字幕…',
 };
 
-export interface HarvestOptions {
-  /**
-   * 刚刚切换了视频。此时页面 DOM 里可能还留着上一个视频的字幕行，
-   * DOM 层不能直接拿「现有文字」返回，必须先让原生面板重建。
-   */
-  staleRisk?: boolean;
-  /**
-   * 切换前那条视频的内容指纹。
-   *
-   * `staleRisk` 只能表达「有风险」，挡不住真正的问题：切页后播放器已经切到
-   * 新视频，所有基于 videoId 的校验都会放行，而原生面板里还是旧行。
-   * 带上指纹，DOM 层就能把「和上一条一模一样」的结果判出来丢掉。
-   */
-  avoid?: string | null;
-  /**
-   * 同步 DOM 预览回传：只临时显示，不能当最终结果、不能写缓存。
-   * 完整结果到达后由 load() 覆盖它。
-   */
-  onPreview?: (lines: TranscriptLine[]) => void;
-}
+/** 抓取上下文的语义见 `site/types.ts` 的 `SiteHarvestOptions`。 */
+export type HarvestOptions = SiteHarvestOptions;
 
-export interface SessionHooks {
-  /** 由宿主注入：扩展 = 通过 bridge 拆 world 跑；油猴 = 同一个进程里跑 */
-  harvest: (
-    videoId: string,
-    signal: AbortSignal,
-    onStage: (stage: string) => void,
-    options?: HarvestOptions,
-  ) => Promise<HarvestResult>;
-  /** 标题按 videoId 取：能对上 playerResponse 才用，避免拿到上一个视频的标题 */
-  title: (videoId: string) => string;
+export interface SessionOptions {
+  win: Window;
   /**
-   * 用户当前想要的语言方案。既决定挑哪些轨道，也决定缓存该取哪个语言的条目——
-   * 少了它，「中文」会读到上次缓存的英文。
+   * 站点实现。会话层只认这一层：视频 id、标题、章节、语言、抓取、原生面板收合
+   * 全部从站点来 —— 换站点不需要动这里一行。
    */
-  langPlan?: () => LangPlan;
-  /**
-   * storyboard 规格。扩展的 content script 在 isolated world，读不到页面的
-   * playerResponse，必须由宿主通过 MAIN world bridge 取；不传则就地读。
-   */
-  storyboard?: (videoId: string) => Promise<string | null>;
+  site: SiteAdapter;
 }
 
 export interface Session {
@@ -83,9 +43,18 @@ export interface Session {
  * 两个宿主共用的会话逻辑：URL 同步、缓存、抓取、播放跟踪、seek。
  * 不在 core 里，因为它需要真实 DOM（video 元素），但仍然不认识 chrome.*。
  */
-export function createSession(options: { win: Window; hooks: SessionHooks }): Session {
-  const { win, hooks } = options;
+export function createSession(options: SessionOptions): Session {
+  const { win, site } = options;
   const store = createStore<PanelState>(emptyPanelState());
+
+  /** 地址栏现在这条视频；site 负责解析（YouTube `?v=` / B 站 BV+分P）。 */
+  const currentVideoId = (): string | null => {
+    try {
+      return site.videoIdOf(win.location);
+    } catch {
+      return null;
+    }
+  };
 
   let controller: AbortController | null = null;
   let inflight = 0;
@@ -100,21 +69,16 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
   let staleSignature: string | null = null;
 
   /**
-   * 宿主要是提供了 storyboard 钩子就走它（扩展需要穿到 MAIN world），
-   * 否则就地读 —— 油猴脚本本身就在页面上下文，直接就能拿到。
-   * 失败一律降级成 null：没有截图不影响章节本身。
-   */
-  /**
    * 缓存里的字幕是否装得进这条视频。
    * 留 60s 容差：ASR 末条常常略微超过片长，用户也可能看到片尾推荐位。
    */
-  const fitsVideoDuration = (lines: TranscriptLine[]): boolean =>
-    transcriptFitsDuration(lines, readVideoDuration(win));
+  const fitsVideoDuration = (lines: TranscriptLine[], videoId: string): boolean =>
+    transcriptFitsDuration(lines, site.duration(videoId));
 
+  /** storyboard 走站点：扩展端它穿 MAIN world 桥，油猴端就地读；失败一律降级成 null。 */
   const loadStoryboard = async (videoId: string): Promise<string | null> => {
     try {
-      if (hooks.storyboard) return await hooks.storyboard(videoId);
-      return readStoryboardSpec(win, videoId);
+      return await site.storyboard(videoId);
     } catch {
       return null;
     }
@@ -126,9 +90,13 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
    * 否则首屏会白白丢掉章节。
    */
   const readChaptersIfCurrent = (videoId: string): PanelState['chapters'] => {
-    const actual = readPlayerVideoId(win);
+    const actual = site.playerVideoId();
     if (actual && actual !== videoId) return [];
-    return readChapters(win.document);
+    try {
+      return site.chapters();
+    } catch {
+      return [];
+    }
   };
 
   const applyResult = async (
@@ -137,7 +105,7 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
     context: { staleRisk?: boolean } = {},
   ): Promise<void> => {
     // 抓取期间用户可能已经切走：这份结果属于旧视频，直接丢掉
-    const currentId = readVideoId(win);
+    const currentId = currentVideoId();
     if (currentId && currentId !== videoId) {
       log({
         code: 'UNKNOWN',
@@ -157,7 +125,8 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
     const storyboard = await loadStoryboard(videoId);
     store.setState({
       videoId,
-      title: hooks.title(videoId),
+      site: site.id,
+      title: site.title(videoId),
       status: 'ready',
       lines: displayLines,
       complete: result.complete !== false,
@@ -186,7 +155,7 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
     if (result.lines.length > 0 && cacheable) {
       await writeCache(
         {
-          key: `${videoId}|${result.track?.languageCode ?? 'na'}|${result.track?.kind ?? 'manual'}`,
+          site: site.cacheNamespace,
           videoId,
           lang: result.track?.languageCode ?? 'na',
           kind: result.track?.kind ?? 'manual',
@@ -200,7 +169,7 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
         },
         // 归属守卫：播放器此刻不在这个视频上，就不能把内容算到它头上。
         // 少了这一步，一次「切页窗口期抓到上一页」会把错误内容固化 7 天。
-        { playerVideoId: readPlayerVideoId(win) },
+        { site: site.cacheNamespace, playerVideoId: site.playerVideoId() },
       );
     }
   };
@@ -220,14 +189,14 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
 
     if (!force) {
       // 选中文就不能拿上次缓存的英文
-      const wantedLang = hooks.langPlan?.().tlang ?? null;
-      const cached = await readCacheForVideo(videoId, wantedLang);
+      const wantedLang = site.langPlan().tlang;
+      const cached = await readCacheForVideo(site.cacheNamespace, videoId, wantedLang);
       if (run !== inflight) return;
 
       // 内容的物理一致性校验：字幕最后一条不可能晚于视频结束。
       // 超了就说明这条缓存其实是**别的视频**的字幕（早期版本在切页窗口期写错的），
       // 它的 videoId 是对的，光比 id 永远发现不了。
-      if (cached && !fitsVideoDuration(cached.lines)) {
+      if (cached && !fitsVideoDuration(cached.lines, videoId)) {
         log({
           code: 'UNKNOWN',
           source: 'cache',
@@ -243,7 +212,8 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
         const displayLines = mergeFragments(rawLines);
         store.setState({
           videoId,
-          title: cached.title || hooks.title(videoId),
+          site: site.id,
+          title: cached.title || site.title(videoId),
           status: 'ready',
           lines: displayLines,
           complete: true,
@@ -279,7 +249,7 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
       failures: [],
       progress: '准备抓取…',
       mergeStats: null,
-      title: hooks.title(videoId),
+      title: site.title(videoId),
       // 强制重抓通常意味着「换了语言」：旧行是另一种语言，留着只会误导
       ...(force ? { lines: [] as PanelState['lines'], activeIndex: -1 } : {}),
     });
@@ -301,19 +271,19 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
     };
 
     try {
-      // 不再先等播放器 12s / 10s：结构化 get_transcript 不依赖播放器就绪。
+      // 不再先等播放器 12s / 10s：结构化源不依赖播放器就绪。
       // DOM 预览自己有 videoId 校验与内容指纹闸门，不会把旧视频文字当新的。
-      const result = await hooks.harvest(
+      const result = await site.harvest({
         videoId,
         signal,
-        (stage) => {
+        onStage: (stage) => {
           if (run !== inflight) return;
           store.setState({ progress: STAGE_TEXT[stage as keyof typeof STAGE_TEXT] ?? '正在抓取…' });
         },
         // 指纹**不看 force**：force 既用于换语言，也用于「失败后重试」。
         // 重试恰恰是最容易再读到旧面板的时刻，这时候撤掉闸门等于前功尽弃。
-        { staleRisk, avoid: staleSignature, onPreview: showPreview },
-      );
+        options: { staleRisk, avoid: staleSignature, onPreview: showPreview },
+      });
       if (signal.aborted || run !== inflight) return;
       if (result.lines.length === 0) throw Object.assign(new Error('empty transcript'), { code: 'NO_CAPTION_TRACK' });
       await applyResult(videoId, result, { staleRisk });
@@ -338,7 +308,7 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
         diagnostic:
           [
             `脚本版本: v${typeof __YTT_VERSION__ === 'string' ? __YTT_VERSION__ : 'dev'}`,
-            getDomDiagnostic(),
+            site.diagnostic() ?? '',
           ]
             .filter((line) => line.length > 0)
             .join('\n') || null,
@@ -356,26 +326,27 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
    * 都能在下一轮自己修回来 —— 否则面板会静默冻结在上一个视频上。
    */
   const reconcile = (): void => {
-    const videoId = readVideoId(win);
+    const videoId = currentVideoId();
     const current = store.getState();
 
     if (!videoId) {
       if (current.videoId) {
         controller?.abort();
-        store.setState({ ...emptyPanelState(''), status: 'idle' });
+        store.setState({ ...emptyPanelState(''), site: site.id, status: 'idle' });
+        site.onNavigate?.(null);
       }
       return;
     }
 
     if (videoId === current.videoId && current.status !== 'idle') {
-      // 顺带校正标题：切页那一瞬间 hooks.title() 可能读到还没更新的 document.title，
+      // 顺带校正标题：切页那一瞬间 title() 可能读到还没更新的 document.title，
       // 写进去之后就没有第二次机会了。这里每轮对一次，读到的才算数。
-      const title = hooks.title(videoId);
+      const title = site.title(videoId);
       if (title && title !== current.title) store.setState({ title });
 
-      // 可用语言同理：playerResponse 往往比地址栏晚一步就绪，
+      // 可用语言同理：轨道列表往往比地址栏晚一步就绪（B 站要等接口回来），
       // 语言按钮要等它到了才出现，所以每轮对一次。
-      const langs = readAvailableLangs(win, videoId);
+      const langs = site.availableLangs(videoId);
       if (langs.length !== current.availableLangs.length || langs.some((l, i) => l !== current.availableLangs[i])) {
         store.setState({ availableLangs: langs });
       }
@@ -390,15 +361,19 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
       staleSignature = current.lines.length > 0 ? contentSignature(current.lines) : null;
       // 标记这一次是「换视频」：DOM 层的现有快照不可信
       switchPending = true;
+      // 站内短期缓存（轨道列表等）按新视频重来
+      site.onNavigate?.(videoId);
       // 异步确认式收起：点一下经常赶不上 YouTube 的 DOM 更新，
       // 旧版本因此把面板留在页面上（用户看到的「原生字幕不会消失」）。
       // 只收**我们自己点开**的：用户手动开的那个去点关闭，屏幕上就是「字幕框闪一下」。
       // 旧面板的内容由 staleRisk（内容指纹闸门）挡着，不靠关面板来保证归属。
-      void closeTranscriptPanelIfOurs(win.document).then((closed) => {
-        if (closed) {
-          log({ code: 'UNKNOWN', source: 'dom', detail: `已收起 ${current.videoId} 残留的原生字幕面板` });
-        }
-      });
+      void Promise.resolve(site.closeNativePanel?.())
+        .then((closed) => {
+          if (closed) {
+            log({ code: 'UNKNOWN', source: 'dom', detail: `已收起 ${current.videoId} 残留的原生字幕面板` });
+          }
+        })
+        .catch(() => undefined);
     }
 
     controller?.abort();
@@ -406,9 +381,10 @@ export function createSession(options: { win: Window; hooks: SessionHooks }): Se
     // 由 load() 在 videoId 对齐后重新填充
     store.setState({
       ...emptyPanelState(videoId),
+      site: site.id,
       status: 'loading',
-      title: hooks.title(videoId),
-      availableLangs: readAvailableLangs(win, videoId),
+      title: site.title(videoId),
+      availableLangs: site.availableLangs(videoId),
     });
     // 截图规格可能要走异步桥，先渲染章节、稍后补图
     void loadStoryboard(videoId).then((spec) => {

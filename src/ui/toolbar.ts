@@ -30,6 +30,10 @@ export interface ToolbarView {
   /** 当前展示/复制的是字幕还是章节 */
   view: ContentView;
   chaptersAvailable: boolean;
+  /** 这个站点有没有章节（B 站没有 → 整组视图按钮隐藏，不给永远点不动的按钮） */
+  canChapters: boolean;
+  /** 站点是否支持机器翻译：不支持时语言缺口的提示要说清楚 */
+  machineTranslate: boolean;
   /** 当前选中的字幕语言；auto = 同音频（两个按钮都不高亮） */
   lang: LangChoice;
   /** 中/英至少有一个可用时才显示这组按钮；两个都没有就整组隐藏 */
@@ -308,9 +312,10 @@ export function createToolbar(options: ToolbarOptions): ToolbarHandle {
 
       // 中/英都没字幕 → 整组隐藏，不给两个永远点不动的按钮
       show(langWrap, view.showLangGroup);
+      const noTranslate = view.machineTranslate ? '' : '（该站点不支持机器翻译）';
       for (const [btn, choice, available, missingHint] of [
-        [zhBtn, 'zh', view.zhAvailable, '这个视频没有中文字幕'],
-        [enBtn, 'en', view.enAvailable, '这个视频没有英文字幕'],
+        [zhBtn, 'zh', view.zhAvailable, `这个视频没有中文字幕${noTranslate}`],
+        [enBtn, 'en', view.enAvailable, `这个视频没有英文字幕${noTranslate}`],
       ] as const) {
         // 有字幕但缺这个语言：按钮留着但禁用，悬停说明原因 —— 直接消失会让人以为是 bug
         btn.disabled = !available;
@@ -321,6 +326,8 @@ export function createToolbar(options: ToolbarOptions): ToolbarHandle {
         btn.setAttribute('aria-pressed', on ? 'true' : 'false');
       }
 
+      // 站点没有章节能力时整组隐藏（B 站）：留一个禁用按钮只会让人反复点
+      show(viewBtn, view.canChapters);
       viewBtn.disabled = !view.chaptersAvailable;
       viewBtn.title = view.chaptersAvailable ? '切换 字幕 / 章节' : '这个视频没有章节';
       setText(viewLabel, view.view === 'chapters' ? '章节' : '字幕');

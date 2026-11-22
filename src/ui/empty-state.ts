@@ -1,12 +1,14 @@
 import type { ErrorCode } from '../core/types';
 import { h } from './dom';
 import { icon } from './icons';
-import { EMPTY_COPY, ERROR_COPY } from './labels';
+import { emptyCopy, ERROR_COPY } from './labels';
 
 export type EmptyKind = 'loading' | 'error' | 'nodata' | 'nomatch';
 
 export interface EmptyOptions {
   kind: EmptyKind;
+  /** 站点 id：决定空态文案（B 站要多说一句「需要登录」） */
+  site?: string | null;
   code?: ErrorCode | null;
   detail?: string;
   needle?: string;
@@ -68,7 +70,7 @@ export function renderEmptyState(options: EmptyOptions): HTMLElement {
     ]);
   }
 
-  const copy = options.code ? ERROR_COPY[options.code] : EMPTY_COPY;
+  const copy = options.code ? ERROR_COPY[options.code] : emptyCopy(options.site);
   const isError = options.kind === 'error';
   const glyph = icon(isError ? 'alert' : 'searchX', 18);
   glyph.style.color = isError ? 'var(--ytt-err)' : 'var(--ytt-text-mute)';

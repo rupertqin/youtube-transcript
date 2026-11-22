@@ -4,9 +4,10 @@ import { installTimedTextHook } from '../src/core/harvest/intercept';
 import { runRemoteSources } from '../src/core/harvest/sources';
 import { interceptWithAutoSwitch } from '../src/core/harvest/player-track';
 import { readPlayerResponse, readStoryboardSpec } from '../src/core/harvest/player';
+import { readBiliPageState } from '../src/core/site/bilibili/page-state';
 import { log } from '../src/core/log';
 import type { HarvestContext } from '../src/core/types';
-import { createBridgeEndpoint } from '../src/platform/bridge';
+import { createBridgeEndpoint } from '../src/platform/bridge.chrome-main-world';
 
 /**
  * MAIN world：唯一能看到页面 JS 上下文的地方。
@@ -14,13 +15,23 @@ import { createBridgeEndpoint } from '../src/platform/bridge';
  * 抓到的数据通过 postMessage 交给 ISOLATED 的 content script。
  */
 export default defineContentScript({
-  matches: ['https://www.youtube.com/*'],
+  matches: ['https://www.youtube.com/*', 'https://www.bilibili.com/*'],
   runAt: 'document_start',
   world: 'MAIN',
   main() {
+    const endpoint = createBridgeEndpoint(window);
+
+    // B 站只需要把页面世界的 __INITIAL_STATE__ 摘要交给 content script
+    // （isolated world 读不到页面对象）。不装 timedtext hook —— 那是 YouTube 的通路，
+    // 在 B 站装它只会白白 patch fetch/XHR。
+    if (location.hostname.endsWith('bilibili.com')) {
+      endpoint.handle('PING', () => ({ ready: true }));
+      endpoint.handle('BILI_STATE', () => readBiliPageState(window));
+      return;
+    }
+
     installShadowCapture(window);
     const hook = installTimedTextHook(window);
-    const endpoint = createBridgeEndpoint(window);
 
     endpoint.handle('PING', () => ({ ready: true, hookInstalledAt: hook.installedAt }));
 

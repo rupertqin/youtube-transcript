@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createSession, type SessionHooks } from '../src/platform/session';
+import { createSession } from '../src/platform/session';
+import { createFakeSite } from './fake-site';
 
 /**
  * 切页自愈。
@@ -59,20 +60,12 @@ function makeWin(initialId: string): FakeWin {
   };
 }
 
-const hooks: SessionHooks = {
-  harvest: async (videoId) => ({
-    lines: [{ start: 0, dur: 0, text: `line of ${videoId}` }],
-    showTimestamps: true,
-    source: 'dom',
-    failures: [],
-  }),
-  title: (videoId) => `title-${videoId}`,
-};
+const site = createFakeSite();
 
 describe('session 对账（reconcile）', () => {
   it('地址栏换视频后，一次 sync 就把状态切过去（不依赖抓取完成）', () => {
     const fake = makeWin('AAAAAAAAAAA');
-    const session = createSession({ win: fake.win, hooks });
+    const session = createSession({ win: fake.win, site });
 
     session.sync();
     expect(session.store.getState().videoId).toBe('AAAAAAAAAAA');
@@ -92,7 +85,7 @@ describe('session 对账（reconcile）', () => {
 
   it('同一个视频重复 sync 是幂等的，不会反复清空', () => {
     const fake = makeWin('AAAAAAAAAAA');
-    const session = createSession({ win: fake.win, hooks });
+    const session = createSession({ win: fake.win, site });
 
     session.sync();
     session.store.setState({ status: 'ready' });
@@ -104,7 +97,7 @@ describe('session 对账（reconcile）', () => {
 
   it('离开观看页（没有 ?v=）时清空状态', () => {
     const fake = makeWin('AAAAAAAAAAA');
-    const session = createSession({ win: fake.win, hooks });
+    const session = createSession({ win: fake.win, site });
     session.sync();
 
     // 模拟跳去首页
@@ -121,7 +114,7 @@ describe('session 对账（reconcile）', () => {
 describe('session.start 定时自愈', () => {
   it('用 500ms 间隔起一个对账循环，且重复 start 不会叠加定时器', () => {
     const fake = makeWin('AAAAAAAAAAA');
-    const session = createSession({ win: fake.win, hooks });
+    const session = createSession({ win: fake.win, site });
 
     session.start();
     session.start();
@@ -134,7 +127,7 @@ describe('session.start 定时自愈', () => {
     vi.useFakeTimers();
     try {
       const fake = makeWin('AAAAAAAAAAA');
-      const session = createSession({ win: fake.win, hooks });
+      const session = createSession({ win: fake.win, site });
 
       // start 会立刻对账一次
       session.start();

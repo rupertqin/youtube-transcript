@@ -14,8 +14,9 @@ const meta = `// ==UserScript==
 // @name         YouTube Transcript Studio
 // @namespace    https://github.com/youtube-transcript-studio
 // @version      ${pkg.version}
-// @description  Extract, search and export YouTube transcripts from a floating panel.
+// @description  Extract, search and export transcripts from YouTube and Bilibili.
 // @match        https://www.youtube.com/*
+// @match        https://www.bilibili.com/*
 // @run-at       document-start
 // @grant        none
 // @noframes

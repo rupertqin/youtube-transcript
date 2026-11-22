@@ -161,8 +161,8 @@ describe('选择器覆盖', () => {
 
 describe('缓存键', () => {
   it('带结构版本前缀：判定规则一改，旧条目自动失效', () => {
-    expect(cacheKey('abcdefghijk')).toMatch(/^v\d+\|abcdefghijk\|na\|manual$/u);
-    expect(cacheKey('abcdefghijk', 'en', 'asr')).toMatch(/\|en\|asr$/u);
+    expect(cacheKey('youtube', 'abcdefghijk')).toMatch(/^v\d+\|youtube\|abcdefghijk\|na\|manual$/u);
+    expect(cacheKey('youtube', 'abcdefghijk', 'en', 'asr')).toMatch(/\|en\|asr$/u);
   });
 });
 

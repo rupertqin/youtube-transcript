@@ -118,12 +118,17 @@ export function readPlayerVideoId(win: Window): string | null {
   return typeof initial === 'string' && initial ? initial : null;
 }
 
-export function readVideoId(win: Window): string | null {
-  const url = new URL(win.location.href);
+/** 从地址解析 YouTube 视频 id（`?v=` 或 `/shorts/<id>`）。 */
+export function videoIdFromHref(href: string): string | null {
+  const url = new URL(href);
   const fromQuery = url.searchParams.get('v');
   if (fromQuery) return fromQuery;
   const shorts = /\/shorts\/([\w-]{6,})/u.exec(url.pathname);
   return shorts ? shorts[1] : null;
+}
+
+export function readVideoId(win: Window): string | null {
+  return videoIdFromHref(win.location.href);
 }
 
 export function readTitle(win: Window, response?: RawPlayerResponse | null): string {

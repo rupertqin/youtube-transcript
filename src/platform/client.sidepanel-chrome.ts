@@ -4,7 +4,7 @@ import { isPanelBroadcast, RUNTIME_TAG, type PanelRequest } from './protocol';
 import type { TranscriptClient } from './types';
 
 /**
- * Side Panel 端：状态在 content script 里，这里只是一个远程视图。
+ * Chrome 扩展 Side Panel 专属客户端：状态在 content script 里，这里只是一个远程视图。
  * 侧栏文档拿不到页面 video，所有动作（load/seek）都必须转成消息。
  */
 export function createRemoteClient(): TranscriptClient {
