@@ -1,3 +1,8 @@
+import {
+  hasNoCaptions,
+  setEntryButtonOpen,
+  setEntryButtonUnavailable,
+} from '../core/dom/button';
 import { waitForElement } from '../core/dom/wait';
 import type { SitePanelHandle } from '../core/site/types';
 import type { TranscriptClient } from '../platform/types';
@@ -21,14 +26,26 @@ export interface SidebarEntryOptions extends SidebarPanelOptions {
 }
 
 export function createSidebarWithEntryButton(options: SidebarEntryOptions): SitePanelHandle {
-  const { doc, label, currentVideoId } = options;
-  const sidebar: SidebarPanelHandle = createSidebarPanel(options);
+  const { doc, label, currentVideoId, client } = options;
+  let sidebar: SidebarPanelHandle;
+  sidebar = createSidebarPanel({
+    ...options,
+    onToggle: (open) => setEntryButtonOpen(doc, open, BILI_ENTRY_BUTTON_ID),
+  });
 
   let button: HTMLButtonElement | null = null;
   let wrapper: HTMLLIElement | null = null;
   let hintTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
   let watchTimer: ReturnType<typeof globalThis.setInterval> | null = null;
   let observer: MutationObserver | null = null;
+
+  const applyNoCaptions = (): void => {
+    setEntryButtonUnavailable(doc, hasNoCaptions(client.getState()), BILI_ENTRY_BUTTON_ID);
+  };
+  const unsubscribeState = client.subscribe((state) => {
+    setEntryButtonUnavailable(doc, hasNoCaptions(state), BILI_ENTRY_BUTTON_ID);
+  });
+  applyNoCaptions();
 
   const flashNoSidebar = (): void => {
     if (!button) return;
@@ -100,6 +117,8 @@ export function createSidebarWithEntryButton(options: SidebarEntryOptions): Site
     doc.getElementById(BILI_ENTRY_BUTTON_ID)?.remove();
     list.insertBefore(wrapper, upload);
     if (button && !wrapper.contains(button)) wrapper.appendChild(button);
+    setEntryButtonOpen(doc, sidebar.isOpen(), BILI_ENTRY_BUTTON_ID);
+    applyNoCaptions();
   }
 
   function startWatch(): void {
@@ -137,6 +156,7 @@ export function createSidebarWithEntryButton(options: SidebarEntryOptions): Site
     toggle: () => sidebar.toggle(),
     isOpen: () => sidebar.isOpen(),
     destroy() {
+      unsubscribeState();
       if (watchTimer !== null) globalThis.clearInterval(watchTimer);
       if (hintTimer !== null) globalThis.clearTimeout(hintTimer);
       observer?.disconnect();

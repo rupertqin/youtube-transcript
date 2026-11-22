@@ -1,4 +1,11 @@
-import { ensureEntryButton, flashEntryButton, removeEntryButton } from '../dom/button';
+import {
+  ensureEntryButton,
+  flashEntryButton,
+  hasNoCaptions,
+  removeEntryButton,
+  setEntryButtonOpen,
+  setEntryButtonUnavailable,
+} from '../dom/button';
 import { getDomDiagnostic, readDomPreview, readRenderedTranscript } from '../dom/native-panel';
 import { closeTranscriptPanelIfOurs, ensureFreshTranscriptRequest } from '../dom/panel';
 import { readChapters } from '../format/copy';
@@ -129,7 +136,16 @@ export function createYouTubeSite(options: YouTubeSiteOptions): SiteAdapter {
         css: input.css,
         client: input.client,
         currentVideoId: input.currentVideoId,
+        onToggle: (open) => setEntryButtonOpen(doc, open),
       });
+
+      const applyNoCaptions = (): void => {
+        setEntryButtonUnavailable(doc, hasNoCaptions(input.client.getState()));
+      };
+      const unsubscribeState = input.client.subscribe((state) => {
+        setEntryButtonUnavailable(doc, hasNoCaptions(state));
+      });
+      applyNoCaptions();
 
       const refreshButton = async (): Promise<void> => {
         if (!currentId()) {
@@ -139,7 +155,7 @@ export function createYouTubeSite(options: YouTubeSiteOptions): SiteAdapter {
         await ensureEntryButton({
           doc,
           label: site.entryLabel,
-          title: '在右栏打开字幕',
+          title: '展开 / 收起字幕',
           onClick: () => {
             if (sidebar.isOpen()) {
               sidebar.hide();
@@ -148,6 +164,8 @@ export function createYouTubeSite(options: YouTubeSiteOptions): SiteAdapter {
             if (!sidebar.show()) flashEntryButton(doc, '当前页面没有右栏');
           },
         });
+        setEntryButtonOpen(doc, sidebar.isOpen());
+        applyNoCaptions();
       };
       void refreshButton();
 
@@ -162,6 +180,7 @@ export function createYouTubeSite(options: YouTubeSiteOptions): SiteAdapter {
         toggle: () => sidebar.toggle(),
         isOpen: () => sidebar.isOpen(),
         destroy() {
+          unsubscribeState();
           sidebar.destroy();
           removeEntryButton(doc);
         },

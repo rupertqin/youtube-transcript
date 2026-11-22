@@ -99,6 +99,8 @@ export interface SidebarPanelOptions {
   currentVideoId?: () => string | null;
   /** 卡片高度；B 站右栏比 YouTube 窄，站点适配器会传更矮的值 */
   height?: string;
+  /** 宿主与右栏顶部的间距；B 站右栏默认贴顶，站点适配器会传一个正值 */
+  topGap?: string;
 }
 
 export interface SidebarPanelHandle {
@@ -160,8 +162,9 @@ export function createSidebarPanel(options: SidebarPanelOptions): SidebarPanelHa
   function buildHost(): HTMLElement {
     const el = doc.createElement('div');
     el.id = SIDEBAR_HOST_ID;
-    // 宽度交给右栏，margin-bottom 与下方「相关视频」拉开距离
-    el.style.cssText = 'display:block;width:100%;margin:0 0 12px 0;';
+    // 宽度交给右栏；topGap 由站点决定（B 站右栏贴顶，需要留白），
+    // margin-bottom 与下方「相关视频」拉开距离
+    el.style.cssText = `display:block;width:100%;margin:${options.topGap ?? '0'} 0 12px 0;`;
     const shadow = el.attachShadow({ mode: 'open' });
     const style = doc.createElement('style');
     style.textContent = css;

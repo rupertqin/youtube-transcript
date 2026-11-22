@@ -2,9 +2,9 @@
  * 零依赖图标生成器：手写 PNG 编码（RGBA + zlib），4x 超采样做抗锯齿。
  * 输出 public/icon/{16,32,48,128}.png，供 manifest 与商店使用。
  *
- * 图形：圆角红底 + 白色字母 **Y**（YouTube 的首字母）。
- * Y 由三段等宽圆头线段构成，叉口 90°，与播放键的箭头同向 ——
- * 红底圆角方块保留 YouTube 家族感，字母本身承担品牌识别。
+ * 图形：圆角红底 + 白色汉字 **字**（字幕 / 文稿的直白符号）。
+ * 用等宽圆头笔画拼出「宀 + 子」，笔画比原字母 Y 稍细，避免小尺寸糊成一团；
+ * 红底圆角方块保留原有家族感，字形本身承担品牌识别。
  */
 import { deflateSync } from 'node:zlib';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -74,7 +74,7 @@ function roundedRectContains(x, y, w, h, r) {
   return dx * dx + dy * dy <= r * r;
 }
 
-/** 点到线段的最短距离（用来把 Y 的三笔当成三个「圆头胶囊」）。 */
+/** 点到线段的最短距离：把每笔当成圆头胶囊。 */
 function segmentDistance(px, py, ax, ay, bx, by) {
   const vx = bx - ax;
   const vy = by - ay;
@@ -87,33 +87,113 @@ function segmentDistance(px, py, ax, ay, bx, by) {
 
 const PAD = 0.035;
 const MARK = 1 - PAD * 2;
-const STROKE_R = 0.068; // 笔宽 0.136 —— 16px 下约 2px，再细就糊成一条
+const STROKE_R = 0.038 * MARK; // 1.2px @16；再粗「宀」和「子」会粘在一起
 
 /**
- * Y 的三个端点（画布 0..1 坐标）。
+ * 小篆「字」：宀 + 子。
  *
- * 叉口约 90°：左右两臂与竖直中轴各 45°，方向上就是播放键的箭头；
- * 叉口压在略高于视觉中心的位置（0.455），让上半部分的「张开」更醒目，
- * 收笔到 0.762 —— 整体在红底里上下各留约 1/4 的安全边。
+ * 用曲线而不是直线拼，笔画末端自然带卷（宀的屋檐、子的钩）。
+ * 坐标相对字框 0..1，采样前乘 MARK；上下留约 10% 安全边。
  */
-const FORK = { x: 0.5, y: 0.455 };
-const ARMS = [
-  [0.272, 0.245, FORK.x, FORK.y],
-  [0.728, 0.245, FORK.x, FORK.y],
-  [FORK.x, FORK.y, 0.5, 0.762],
+const GLYPH = [
+  // 宀：点 + 微拱屋顶 + 两条垂直边
+  ['M', 0.50, 0.09],
+  ['Q', 0.48, 0.12, 0.50, 0.15],
+  ['M', 0.21, 0.45],
+  ['L', 0.21, 0.39],
+  ['Q', 0.21, 0.34, 0.27, 0.34],
+  ['L', 0.73, 0.34],
+  ['Q', 0.79, 0.34, 0.79, 0.39],
+  ['L', 0.79, 0.45],
+
+  // 子（小篆保留的婴儿意象）：大圆头 + 张开的手臂 + 身体
+  ['O', 0.50, 0.62, 0.085, 0.07], // 子的大头（小篆仍保留的婴儿头部）
+  ['M', 0.50, 0.55],
+  ['C', 0.51, 0.68, 0.49, 0.78, 0.50, 0.85], // 身体（穿过头与手臂）
+  ['C', 0.50, 0.89, 0.45, 0.90, 0.40, 0.89],
+  ['L', 0.36, 0.87], // 下肢左钩
+  ['M', 0.26, 0.76],
+  ['Q', 0.50, 0.79, 0.74, 0.76], // 双臂（长横，穿过身体）
 ];
 
-/** 在 1x1 单位坐标里描述图标：对角渐变红底 + 白色 Y。 */
+/** 把 M/L/Q/C 路径采样成线段集合，供 SDF 距离场使用。 */
+function glyphSegments(commands) {
+  const segments = [];
+  let cursor = null;
+
+  const lineTo = (x, y) => {
+    if (cursor) segments.push([cursor[0], cursor[1], x, y]);
+    cursor = [x, y];
+  };
+
+  for (const [cmd, ...args] of commands) {
+    if (cmd === 'M') {
+      cursor = [args[0], args[1]];
+      continue;
+    }
+    if (cmd === 'L') {
+      lineTo(args[0], args[1]);
+      continue;
+    }
+    if (cmd === 'Q') {
+      const [cx, cy, x, y] = args;
+      const [x0, y0] = cursor;
+      const steps = 12;
+      for (let i = 1; i <= steps; i += 1) {
+        const t = i / steps;
+        const u = 1 - t;
+        lineTo(u * u * x0 + 2 * u * t * cx + t * t * x, u * u * y0 + 2 * u * t * cy + t * t * y);
+      }
+      continue;
+    }
+    if (cmd === 'O') {
+      // 闭合椭圆：用小篆「子」的大头保留婴儿意象
+      const [cx, cy, rx, ry] = args;
+      const steps = 36;
+      cursor = [cx + rx, cy];
+      for (let i = 1; i <= steps; i += 1) {
+        const angle = (i / steps) * Math.PI * 2;
+        lineTo(cx + rx * Math.cos(angle), cy + ry * Math.sin(angle));
+      }
+      continue;
+    }
+    if (cmd === 'C') {
+      const [c1x, c1y, c2x, c2y, x, y] = args;
+      const [x0, y0] = cursor;
+      const steps = 16;
+      for (let i = 1; i <= steps; i += 1) {
+        const t = i / steps;
+        const u = 1 - t;
+        lineTo(
+          u ** 3 * x0 + 3 * u * u * t * c1x + 3 * u * t * t * c2x + t ** 3 * x,
+          u ** 3 * y0 + 3 * u * u * t * c1y + 3 * u * t * t * c2y + t ** 3 * y,
+        );
+      }
+    }
+  }
+  return segments;
+}
+
+const GLYPH_LINES = glyphSegments(GLYPH).map(([ax, ay, bx, by]) => [
+  ax * MARK,
+  ay * MARK,
+  bx * MARK,
+  by * MARK,
+]);
+
+/** 在 1x1 单位坐标里描述图标：对角渐变红底 + 白色「字」。 */
 function sample(u, v) {
   const x = u - PAD;
   const y = v - PAD;
   if (x < 0 || y < 0 || x > MARK || y > MARK) return null;
   if (!roundedRectContains(x, y, MARK, MARK, MARK * 0.25)) return null;
 
-  // 左上偏亮 → 右下偏暖，比纯红更有层次，又不离开 YouTube 的红
+  // 左上偏亮 → 右下偏暖，比纯红更有层次，又不离开原来的红橙家族
   const t = (x / MARK) * 0.5 + (y / MARK) * 0.5;
-  for (const [ax, ay, bx, by] of ARMS) {
-    if (segmentDistance(x, y, ax, ay, bx, by) <= STROKE_R) return [255, 255, 255];
+  for (const [ax, ay, bx, by] of GLYPH_LINES) {
+    if (segmentDistance(x, y, ax, ay, bx, by) <= STROKE_R) {
+      return [255, 255, 255];
+    }
   }
 
   return [

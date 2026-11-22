@@ -20,7 +20,7 @@ export function createFloatButton(options: FloatButtonOptions): HTMLButtonElemen
     doc: options.doc,
     label: options.label,
     id: BILI_ENTRY_BUTTON_ID,
-    title: '在右栏打开字幕',
+    title: '展开 / 收起字幕',
     onClick: () => options.onClick(),
   });
   button.style.height = '34px';

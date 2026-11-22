@@ -260,8 +260,9 @@ export function createBilibiliSite(options: BilibiliSiteOptions): SiteAdapter {
         client: input.client,
         currentVideoId: input.currentVideoId,
         label: site.entryLabel,
-        // B 站右栏比 YouTube 窄，卡片矮一些
+        // B 站右栏比 YouTube 窄，卡片矮一些；右栏本身贴顶，留一点上边距
         height: 'min(560px, 70vh)',
+        topGap: '12px',
       });
     },
   };
