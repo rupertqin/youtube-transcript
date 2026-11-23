@@ -140,10 +140,12 @@ describe('章节行缩略图', () => {
     const bar = row.querySelector('[data-role="bar"]')!;
 
     // 三处都要变，不能因为多了缩略图就错位。
-    // 时间戳保持灰色（原版如此），高亮靠正文变亮 + 左侧竖条。
-    expect(text.className).toContain('text-[var(--ytt-text)]');
+    // 时间戳内联在正文开头、保持灰色；高亮靠正文变亮 + 左侧竖条。
+    expect(text.className).toContain('text-[var(--ytt-transcript)]');
     expect(time.className).toContain('text-[var(--ytt-text-dim)]');
-    expect(time.className).toContain('block');
+    // 内联而不是独立一行：设了 block 就又会跑到正文上方
+    expect(time.className).not.toContain('block');
+    expect(time.textContent).toBe('(28:14)');
     expect(bar.className).toContain('bg-[var(--ytt-accent)]');
   });
 });

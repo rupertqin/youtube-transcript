@@ -190,8 +190,12 @@ export function createSession(options: SessionOptions): Session {
     const run = inflight;
 
     if (!force) {
-      // 选中文就不能拿上次缓存的英文
-      const wantedLang = site.langPlan().tlang;
+      // 选中文就不能拿上次缓存的英文。
+      // 必须和抓取用同一份 plan（YouTube 要等轨道表才敢决定是否降级），
+      // 否则会出现「面板写着中文、命中却是上次的英文缓存」。
+      const plan = site.resolvePlan ? await site.resolvePlan(videoId) : site.langPlan();
+      if (run !== inflight) return;
+      const wantedLang = plan.tlang;
       const cached = await readCacheForVideo(site.cacheNamespace, videoId, wantedLang);
       if (run !== inflight) return;
 

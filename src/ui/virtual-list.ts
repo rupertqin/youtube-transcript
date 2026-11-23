@@ -13,6 +13,11 @@ export interface VirtualListHandle {
   setCount(count: number): void;
   scrollToIndex(index: number, align?: 'center' | 'start'): void;
   scrollToTop(): void;
+  /**
+   * 该行是否完整在视口里。
+   * 「跟随播放」只在当前行离开视口时才滚 —— 它还在屏幕上时突然居中很打断阅读。
+   */
+  isVisible(index: number): boolean;
   /** 容器从隐藏变为可见（或被 resize）后重新测量 */
   relayout(): void;
   /**
@@ -165,10 +170,22 @@ export function createVirtualList(options: VirtualListOptions): VirtualListHandl
       const height = heights[index] ?? estimate;
       const target =
         align === 'center' ? top - Math.max(0, (scroller.clientHeight - height) / 2) : top;
-      scroller.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+      // 系统的「减少动态效果」要照办：长列表平滑滚动在低端机上很晃
+      const reduce =
+        typeof matchMedia === 'function' &&
+        matchMedia('(prefers-reduced-motion: reduce)').matches;
+      scroller.scrollTo({ top: Math.max(0, target), behavior: reduce ? 'auto' : 'smooth' });
     },
     scrollToTop() {
       scroller.scrollTo({ top: 0, behavior: 'auto' });
+    },
+    isVisible(index) {
+      if (index < 0 || index >= count) return false;
+      const top = offsets[index] ?? 0;
+      const height = heights[index] ?? estimate;
+      const viewTop = scroller.scrollTop;
+      const viewBottom = viewTop + (scroller.clientHeight || 600);
+      return top >= viewTop && top + height <= viewBottom;
     },
     relayout() {
       lastWidth = scroller.clientWidth;

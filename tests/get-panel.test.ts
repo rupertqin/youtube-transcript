@@ -4,6 +4,7 @@ import {
   fetchGetPanel,
   fetchPanelTranscript,
   getPanelDiagnostic,
+  panelLangSatisfies,
 } from '../src/core/harvest/get-panel';
 import { readTranscriptParams } from '../src/core/harvest/parse/transcript';
 import { installTimedTextHook } from '../src/core/harvest/intercept';
@@ -414,5 +415,33 @@ describe('fetchPanelTranscript：只有 get_panel 一条路', () => {
 
     expect(seen).toHaveLength(1);
     expect(seen[0]).toContain('/youtubei/v1/get_panel');
+  });
+});
+
+/**
+ * 面板只给**默认轨**：用户指定了别的语言时拿它顶就是「切中文显示英文」。
+ *
+ * 语言未知（`defaultAudioLanguage` 缺失，只有 ASR 轨的视频很常见，例如
+ * `K7Q6i3GW_ok`）也必须算不满足 —— 否则「读不出语言」会被当成「读对了」，
+ * 请求中文就静默返回英文。
+ */
+describe('panelLangSatisfies：面板这条轨能不能满足产出语言', () => {
+  it('没指定语言（同音频）时永远算满足', () => {
+    expect(panelLangSatisfies('en', null)).toBe(true);
+    expect(panelLangSatisfies(null, undefined)).toBe(true);
+  });
+
+  it('语言相同（含主语言匹配）算满足', () => {
+    expect(panelLangSatisfies('zh-Hans', 'zh-Hans')).toBe(true);
+    expect(panelLangSatisfies('zh-Hant', 'zh-Hans')).toBe(true);
+  });
+
+  it('语言不同算不满足', () => {
+    expect(panelLangSatisfies('en', 'zh-Hans')).toBe(false);
+  });
+
+  it('语言未知算不满足（不能把「读不出来」当成「读对了」）', () => {
+    expect(panelLangSatisfies(null, 'zh-Hans')).toBe(false);
+    expect(panelLangSatisfies(undefined, 'zh-Hans')).toBe(false);
   });
 });

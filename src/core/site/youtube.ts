@@ -1,5 +1,7 @@
 import {
+  ENTRY_BUTTON_ID,
   ensureEntryButton,
+  entryButtonAction,
   flashEntryButton,
   hasNoCaptions,
   removeEntryButton,
@@ -8,13 +10,14 @@ import {
 } from '../dom/button';
 import { getDomDiagnostic, readDomPreview, readRenderedTranscript } from '../dom/native-panel';
 import { closeTranscriptPanelIfOurs, ensureFreshTranscriptRequest } from '../dom/panel';
+import { sleep } from '../dom/wait';
 import { readChapters } from '../format/copy';
 import { harvestTranscript } from '../harvest/chain';
-import { fetchPanelTranscript } from '../harvest/get-panel';
+import { fetchPanelTranscript, panelLangSatisfies } from '../harvest/get-panel';
 import type { TimedTextHook } from '../harvest/intercept';
 import {
-  hasNativeTrackFor,
   readAvailableLangs,
+  readOwnCaptionLangs,
   readPlayerResponse,
   readPlayerVideoId,
   readStoryboardSpec,
@@ -24,7 +27,7 @@ import {
 } from '../harvest/player';
 import { interceptWithAutoSwitch } from '../harvest/player-track';
 import { runInterceptSource, runRemoteSources } from '../harvest/sources';
-import { langMatches, pickUsableChoice, resolveLangPlan, type LangChoice } from '../langs';
+import { pickUsableChoice, preferOwnLangs, resolveLangPlan, type LangChoice } from '../langs';
 import type { HarvestContext, HarvestResult, Logger, SourceOutcome } from '../types';
 import { createSidebarPanel, type SidebarPanelHandle } from '../../ui/sidebar';
 import { SITE_CAPS } from './registry';
@@ -66,7 +69,18 @@ export interface YouTubeSiteOptions {
 }
 
 function toOutcome(payload: RemotePayload | null): SourceOutcome | null {
-  if (!payload || !Array.isArray(payload.lines) || payload.lines.length === 0) return null;
+  if (!payload || !Array.isArray(payload.lines)) return null;
+  if (payload.lines.length === 0) {
+    // 0 行也要把失败分类带回来：否则「200 但 0 段（POT/无面板）」这种
+    // 有信息量的原因会在过桥时丢成 NETWORK_ERROR 或「没有字幕轨道」。
+    if (!payload.failures?.length) return null;
+    return {
+      lines: [],
+      source: payload.source ?? 'innertube',
+      showTimestamps: payload.showTimestamps !== false,
+      failures: payload.failures,
+    };
+  }
   return {
     lines: payload.lines,
     source: payload.source,
@@ -101,8 +115,101 @@ export function createYouTubeSite(options: YouTubeSiteOptions): SiteAdapter {
       ? `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`
       : null;
 
-  const availableLangs = (videoId: string): string[] =>
-    readAvailableLangs(win, videoId || undefined);
+  /**
+   * 语言表缓存（按 videoId 归属）。
+   *
+   * 两个坑叠在一起，症状是「所有视频都变成中文、语言按钮消失」：
+   *  ① 扩展端是 ISOLATED world，页面世界的 `ytInitialPlayerResponse` 在这里看不见，
+   *     直接读永远是空数组 → 语言按钮从不出现；
+   *  ② 抓取往往在 document_start 后几十毫秒就开始，那时响应还没注入 → 读到空表，
+   *     `pickUsableChoice()` 于是「不敢降级」，用户上次选的「中文」被当成通用诉求。
+   *     v2.29.4 之后机翻真的能用了，于是每个视频都被翻成中文。
+   * 所以：过 MAIN world 桥读 + 按 videoId 缓存 + 算 plan 之前先等到读数。
+   */
+  interface LangInfo {
+    langs: string[];
+    /** 与视频音轨匹配的字幕语言（默认音轨自己的轨 → 音轨语言），「同音频」优先用它 */
+    own: string[];
+  }
+
+  let langCache: { videoId: string } & LangInfo = { videoId: '', langs: [], own: [] };
+  let langInflight: Promise<LangInfo> | null = null;
+  let langInflightId = '';
+  const langTriedAt = new Map<string, number>();
+
+  const readLangsLocal = (videoId: string): LangInfo => ({
+    langs: readAvailableLangs(win, videoId || undefined),
+    own: readOwnCaptionLangs(win, videoId || undefined),
+  });
+
+  const fetchLangs = (videoId: string, timeoutMs = 1_200): Promise<LangInfo> => {
+    if (!bridge || !videoId) return Promise.resolve(readLangsLocal(videoId));
+    if (langInflight && langInflightId === videoId) return langInflight;
+    langInflightId = videoId;
+    langInflight = bridge
+      .request<{ videoId?: string | null; langs?: string[]; own?: string[] } | null>(
+        'READ_LANGS',
+        { videoId },
+        timeoutMs,
+      )
+      .then((payload) => {
+        const info: LangInfo = {
+          langs: Array.isArray(payload?.langs) ? payload.langs : [],
+          own: Array.isArray(payload?.own) ? payload.own : [],
+        };
+        // 过桥期间可能已经切页：不属于这个视频的答案不写进缓存
+        if (payload?.videoId && payload.videoId !== videoId) return info;
+        langCache = { videoId, ...info };
+        return info;
+      })
+      .catch(() => readLangsLocal(videoId))
+      .finally(() => {
+        langInflight = null;
+      });
+    return langInflight;
+  };
+
+  const availableLangs = (videoId: string): string[] => {
+    if (videoId && langCache.videoId === videoId) return langCache.langs;
+    const local = readLangsLocal(videoId).langs;
+    if (local.length > 0) return local;
+    // 扩展端这里必然为空：顺手补一次过桥，结果由下一轮 reconcile 读走
+    if (bridge && videoId && Date.now() - (langTriedAt.get(videoId) ?? 0) > 2_000) {
+      langTriedAt.set(videoId, Date.now());
+      void fetchLangs(videoId).catch(() => undefined);
+    }
+    return local;
+  };
+
+  /**
+   * 算 plan 之前先把语言表拿到手（最多等 ~600ms）。
+   *
+   * 空表 = 「不知道」，而 `pickUsableChoice` 对「不知道」刻意不降级；
+   * 拿它去算 plan 就会把用户上次选的语言套到所有视频上。
+   */
+  const readLangsForPlan = async (videoId: string): Promise<LangInfo> => {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const info = await fetchLangs(videoId, 1_000).catch(() => readLangsLocal(videoId));
+      if (info.langs.length > 0) return info;
+      if (attempt < 3) await sleep(200);
+    }
+    return readLangsLocal(videoId);
+  };
+
+  /** YouTube 能机翻（播放器 `translationLanguage`），所以目标语言不必有原生轨。 */
+  const canTranslate = SITE_CAPS.youtube.machineTranslate;
+
+  /**
+   * 抓取与缓存读取共用这份 plan（await 过语言表），保证两者永远同一语言。
+   *
+   * 「同音频」还要把**视频自己的听写**排到最前：中文浏览器看日文视频时，
+   * 按浏览器语言会先去要中文（拿不到就机翻），而那并不是视频的听写。
+   */
+  const resolvePlan = async (videoId: string) => {
+    const info = await readLangsForPlan(videoId);
+    const plan = resolveLangPlan(pickUsableChoice(readChoice(), info.langs, canTranslate));
+    return preferOwnLangs(plan, info.own);
+  };
 
   const site: SiteAdapter = {
     id: 'youtube',
@@ -127,8 +234,10 @@ export function createYouTubeSite(options: YouTubeSiteOptions): SiteAdapter {
       }
     },
     availableLangs,
-    langPlan: () => resolveLangPlan(pickUsableChoice(readChoice(), availableLangs(currentId() ?? ''))),
-    choice: (videoId) => pickUsableChoice(readChoice(), availableLangs(videoId)),
+    langPlan: () =>
+      resolveLangPlan(pickUsableChoice(readChoice(), availableLangs(currentId() ?? ''), canTranslate)),
+    resolvePlan,
+    choice: (videoId) => pickUsableChoice(readChoice(), availableLangs(videoId), canTranslate),
 
     closeNativePanel: () => closeTranscriptPanelIfOurs(doc),
     diagnostic: () => getDomDiagnostic(),
@@ -152,32 +261,75 @@ export function createYouTubeSite(options: YouTubeSiteOptions): SiteAdapter {
       });
       applyNoCaptions();
 
-      const refreshButton = async (): Promise<void> => {
-        if (!currentId()) {
-          removeEntryButton(doc);
-          return;
-        }
-        await ensureEntryButton({
-          doc,
-          label: site.entryLabel,
-          title: '展开 / 收起字幕',
-          onClick: () => {
-            if (sidebar.isOpen()) {
-              sidebar.hide();
+      /**
+       * 入口按钮与「当前页面有没有视频」保持同步。
+       *
+       * 只靠 locationchange 不够，两个真实故障都出在这里：
+       *  ① YouTube 的 SPA 切页不保证触发宿主那次回调（首页 → 观看页时，
+       *     右栏卡片自己挂上了，按钮却要刷新页面才出现）；
+       *  ② 切页时 YouTube 会重建 masthead，把我们插进 `#end` 的按钮一起冲掉，
+       *     而卡片有 MutationObserver 兜着、按钮没有。
+       * 所以挂一个轻量定时器，每 800ms 对一次账：该在不在就补，不该在就删。
+       */
+      let buttonTimer = 0;
+      let buttonSyncing = false;
+
+      const syncEntryButton = async (): Promise<void> => {
+        if (buttonSyncing) return;
+        buttonSyncing = true;
+        try {
+          const action = entryButtonAction({
+            hasVideo: Boolean(currentId()),
+            button: doc.getElementById(ENTRY_BUTTON_ID),
+          });
+          if (action === 'remove') {
+            removeEntryButton(doc);
+            return;
+          }
+          if (action === 'insert') {
+            await ensureEntryButton({
+              doc,
+              label: site.entryLabel,
+              title: '展开 / 收起字幕',
+              onClick: () => {
+                if (sidebar.isOpen()) {
+                  sidebar.hide();
+                  return;
+                }
+                if (!sidebar.show()) flashEntryButton(doc, '当前页面没有右栏');
+              },
+            });
+            // 等锚点的这段时间里用户可能已经离开观看页（masthead 起晚了会等几秒），
+            // ensureEntryButton 自己不认页面，这里必须复查 —— 否则按钮会留在首页。
+            if (!currentId()) {
+              removeEntryButton(doc);
               return;
             }
-            if (!sidebar.show()) flashEntryButton(doc, '当前页面没有右栏');
-          },
-        });
-        setEntryButtonOpen(doc, sidebar.isOpen());
-        applyNoCaptions();
+          }
+          setEntryButtonOpen(doc, sidebar.isOpen());
+          applyNoCaptions();
+        } catch (error) {
+          // 定时器里抛异常不能外溢，也不能让 buttonSyncing 卡住
+          log({ code: 'UNKNOWN', source: 'dom', detail: `entry button sync failed: ${String(error)}` });
+        } finally {
+          buttonSyncing = false;
+        }
       };
-      void refreshButton();
+
+      const startButtonWatch = (): void => {
+        if (buttonTimer) return;
+        buttonTimer = win.setInterval(() => {
+          void syncEntryButton();
+        }, 800);
+      };
+
+      void syncEntryButton();
+      startButtonWatch();
 
       return {
         ensureMounted() {
           const mounted = sidebar.ensureMounted();
-          void refreshButton();
+          void syncEntryButton();
           return mounted;
         },
         show: () => sidebar.show(),
@@ -186,6 +338,8 @@ export function createYouTubeSite(options: YouTubeSiteOptions): SiteAdapter {
         isOpen: () => sidebar.isOpen(),
         destroy() {
           unsubscribeState();
+          if (buttonTimer) win.clearInterval(buttonTimer);
+          buttonTimer = 0;
           sidebar.destroy();
           removeEntryButton(doc);
         },
@@ -195,9 +349,13 @@ export function createYouTubeSite(options: YouTubeSiteOptions): SiteAdapter {
 
   async function harvest(input: SiteHarvestInput): Promise<HarvestResult> {
     const { videoId, signal, onStage, options: harvestOptions } = input;
-    const plan = site.langPlan();
-    // 没有目标语言的原生轨道时，拦截层 / DOM 层只能给原文 —— 必须让远程先上
-    const needsTranslation = Boolean(plan.tlang) && !hasNativeTrackFor(win, plan.tlang!);
+    // 先等到真正的语言表再算 plan：读不到就当成「不知道」会不降级，
+    // 用户上次选的语言会被套到这个视频上（见 availableLangs 的注释）
+    const plan = await resolvePlan(videoId);
+
+    /** 面板只给默认轨：语言未知也算不满足（见 `panelLangSatisfies`）。 */
+    const panelMatchesTarget = (lang: string | null | undefined): boolean =>
+      panelLangSatisfies(lang, plan.tlang);
 
     const domOptions = () => ({
       videoId,
@@ -252,12 +410,10 @@ export function createYouTubeSite(options: YouTubeSiteOptions): SiteAdapter {
             timeoutMs: 6_000,
           });
           if (!outcome || outcome.lines.length === 0) return null;
-          // 面板永远只给视频**默认轨道**（params 里没有语言位）。
-          // 用户指定了别的语言时拿它顶就是「切中文显示英文」，宁可失败。
-          if (plan.tlang && outcome.lang && !langMatches(outcome.lang, plan.tlang)) {
+          if (!panelMatchesTarget(outcome.lang)) {
             throw Object.assign(
               new Error(
-                `get_panel 只给默认轨 ${outcome.lang}，要的是 ${plan.tlang}；` +
+                `get_panel 只给默认轨 ${outcome.lang ?? '（语言未知）'}，要的是 ${plan.tlang}；` +
                   '在播放器里把字幕语言切成目标语言后点重试',
               ),
               { code: 'NO_CAPTION_TRACK' as const },
@@ -280,11 +436,13 @@ export function createYouTubeSite(options: YouTubeSiteOptions): SiteAdapter {
             );
             const outcome = toOutcome(payload);
             if (!outcome) return null;
+            // 0 行但带 failures 的结果直接放行：让上层把真实错误码记进诊断
+            if (outcome.lines.length === 0) return outcome;
             const got = outcome.track?.languageCode;
-            if (plan.tlang && got && !langMatches(got, plan.tlang)) {
+            if (!panelMatchesTarget(got)) {
               throw Object.assign(
                 new Error(
-                  `get_panel 只给默认轨 ${got}，要的是 ${plan.tlang}；` +
+                  `get_panel 只给默认轨 ${got ?? '（语言未知）'}，要的是 ${plan.tlang}；` +
                     '在播放器里把字幕语言切成目标语言后点重试',
                 ),
                 { code: 'NO_CAPTION_TRACK' as const },
@@ -360,7 +518,9 @@ export function createYouTubeSite(options: YouTubeSiteOptions): SiteAdapter {
       signal,
       log,
       onStage,
-      preferRemote: needsTranslation,
+      // 不再「要翻译就先问远程」：`&tlang=` 被 429 挡死（实测必失败），
+      // 现在翻译由拦截层借播放器的自动翻译拿，远程只会白花一次请求
+      // 并把最终错误码污染成 RATE_LIMITED（用户会看到「请求过于频繁」）。
       structured,
       remote,
       cachedIntercept,

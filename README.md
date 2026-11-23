@@ -29,7 +29,8 @@ B 站轨道不只靠 `type` 判断来源：综合 `lan` 的 `ai-` 前缀、字�
 - **字幕语言可选**：工具栏 `中` / `EN` 两个按钮（有对应字幕才出现），都不选中 = 同音频（不翻译，用视频自己的轨道）
 - 字幕支持搜索 / 命中计数 / 上下条跳转 / 关键词高亮
 - 点击任意行跳转视频时间点，播放时自动高亮并滚动跟随
-- 排版学 YouTube 原生面板：`Roboto, Arial, sans-serif`、正文 **14px / 行高 24px**；时间戳**单独占一行**（12px 灰、在正文上方），左右各 20px 留白，块与块之间约 22px
+- 排版学 YouTube 原生面板：`Roboto, Arial, sans-serif`、正文 **14px / 行高 22px**；时间戳**内联在正文开头**、灰色 12px、括号包住（`(0:00) 正文…`），左右各 20px 留白
+- **段内 vs 段间 = 22px : 34px**（上下内边距各 6px，跨段基线距 ≈ 1.5× 行距）。行距松一档、段距收窄，多行才会先被看成「一块」而不是一格格方块；段落边界由 `(0:00)` 标记与这 1.5 倍留白共同承担
 - 复制全文，或导出 `txt` / `md` / `srt` / `json`
 - 完整结构化字幕源优先的抓取兜底链 + 失败分类，抓一次缓存 7 天
 - ASR 碎片按「约 8 秒一行」合并成段落（与 YouTube 原生面板分组一致），显示 / 搜索 / 复制 / 导出共用同一份
@@ -37,6 +38,21 @@ B 站轨道不只靠 `type` 判断来源：综合 `lan` 的 `ai-` 前缀、字�
 ## 一个站点一个入口
 
 每个站点页面上只有**一个**按钮和一个面板：两个按钮都只显示「字」logo + 展开/收起箭头（无文案、无版本号）。YouTube 的 `ytt-entry-btn` 在 masthead；B 站的 `ytt-float-btn` 是 `<ul class="right-entry">` 里与投稿同级的 `<li>`，插在 `.right-entry-item--upload` 前面；卡片则放在 `#mirror-vdcon > .right-container-inner`。按钮只 toggle 这张卡片，没有右栏时不弹第二界面。
+
+**按钮显隐跟着「页面有没有视频」走，不靠单次回调**：YouTube 端每 800ms 用
+`entryButtonAction()` 对一次账（`hasVideo` + 按钮在不在文档里）：
+
+| 情况 | 动作 |
+| --- | --- |
+| 首页 / 搜索页 / 频道页（地址栏没有 `?v=`） | 移除 |
+| 观看页但按钮还没插，或被站点重建 masthead 冲掉 | 重建 |
+| 观看页且按钮健在 | 保持（不重插，避免点击态被冲掉） |
+
+只靠 `locationchange` 时有两个真实故障：从首页点进视频时右栏卡片自己挂上了、
+按钮却要刷新页面才出现（宿主那次回调不一定触发）；以及切页时 YouTube 重建
+masthead 会把按钮一起冲掉（卡片有 MutationObserver 兜着，按钮没有）。
+`ensureEntryButton()` 等锚点可能等几秒，所以插完还要**复查一次地址栏**——
+否则按钮会留在中途跳过去的首页上。
 
 > **1.x 原版实现已彻底移除**（v2.23.0）。早期为了「先能跑」把旧脚本整份搬进产物，
 > 新版通过一个全局对象调它的提取函数；旧 UI 早已退役、能力也全部由 TS 承接，
@@ -223,11 +239,11 @@ src/ui/                      面板组件（双端同一份，原生 DOM）
 
 | 顺序            | 层                | 说明                                                                                                                                         |
 | --------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| ⓪（仅要翻译时） | `remote`          | `preferRemote`：远程层是唯一能产出目标语言的层，先问它，避免「切中文显示英文」                                                               |
+| ⓪（仅要翻译时） | `remote`          | `preferRemote`：链路仍支持，但 **YouTube 端已不再传** —— 远程层的 `&tlang=` 必 429，见下文「切语言」 |
 | ⓪.5             | `cachedIntercept` | 此前已截获的完整 `get_transcript` / `timedtext` 响应，0ms 命中                                                                               |
 | ①               | `domPreview`      | 同步预览，**不短路**：只让屏幕上先有字，`complete: false`                                                                                    |
 | ②               | `structured`      | 主路径：直接构造 InnerTube `get_panel` 请求，**一次**拿回**全部分段**与精确 `startMs/endMs`。页面自带 params 优先，失败才用自己拼的那条（最多两次请求）；带 6s 上限 |
-| ③               | `intercept`       | 逼原生面板发一次 `get_transcript` 请求，hook 截**完整响应**（短等 2.5s）。**默认不依赖 CC**：面板已开着时收起再点开，强制重新请求；只有「用户指定了产出语言、手上又没有该语言的捕获」时才主动切一次 CC 轨道（见下文「主动切轨」） |
+| ③               | `intercept`       | 逼原生面板发一次 `get_transcript` 请求，hook 截**完整响应**（短等 2.5s）。**默认不依赖 CC**：面板已开着时收起再点开，强制重新请求；只有「用户指定了产出语言、手上又没有该语言的捕获」时才主动切一次 CC 轨道（见下文「主动切轨」）。同音频模式下还会处理**没有原生面板**的视频：短等 900ms 拿不到就借播放器发一次 timedtext（见下文「没有原生字幕面板的视频」） |
 | ④               | `remote`          | `playerResponse.captionTracks` → `/youtubei/v1/player` 降级探测                                                                              |
 | ⑤（兜底）        | `domFallback`     | 以上全失败时，把页面**已经渲染出来**的字幕当结果返回，`complete: false`（**不进缓存**）；会在面板自己的滚动容器里滚到底，把每一屏的行按时间码并起来 |
 
@@ -338,16 +354,67 @@ InnerTube 探不到轨道，而页面上躺着 376 行完整字幕。现在这�
 已有捕获（0ms）→ 有就直接用，不碰播放器
   └─ 没有，且 prefs.autoSwitchTrack 且指定了产出语言
        → 在 tracklist 里找目标语言（同语言优先手动轨，绝不拿别的语言顶）
+         └─ 没有目标语言的原生轨：改用播放器自己的「自动翻译」
+            （轨道对象带 translationLanguage → 播放器发 tlang= 那条）
        → setOption('captions','track', 目标轨)
        → waitForMatch(videoId, 语言匹配, timeout)  ← 只认目标语言，不会被原语言那条顶掉
        → finally 还原：原来有轨道就切回原轨道，原来 CC 是关的就点 CC 按钮关掉
 ```
+
+**没有原生目标轨时不再直接放弃。** 真实案例 `K7Q6i3GW_ok`：原声是中文，字幕轨只有一条
+`en` ASR（YouTube 给的那条本身就是翻译品），页面上也没有 Show transcript。以前会在
+7ms 内报「播放器没有 zh-Hans 轨道」，现在改成给播放器设
+`translationLanguage: { languageCode: 'zh-Hans' }`，让**它**发那条 `tlang=zh-Hans`
+的 timedtext（`tlang` 和 `signature`/`pot` 绑定，自己拼是 429，只有播放器现算的有效）。
+截到的捕获里 `lang` 取 URL 上的 `tlang`，所以缓存键、语言徽标、`satisfiesLang` 拿到的
+都是真正产出的中文。
+
+两个保证不了就白给的地方，现在都堵上了：
+
+- **轨道表可能读不到**。MAIN world 里 `getOption('captions','tracklist')` 未必已就绪
+  （播放器刚初始化，或这个构建只暴露 `setOption`）。空表时退回
+  `playerResponse.captionTracks` 拼出同样形状的轨道再 `setOption` ——
+  否则用户明明看得见字幕，我们却只能报「没有可用字幕轨道」。
+- **失败原因必须能看见**。切轨的 `detail` 现在写进 `failures[]`（面板诊断），
+  不再只 `ctx.log` 到 console：诊断里出现「切轨失败：切到 en→zh-Hans（自动翻译）后
+  1500ms 内没截到 timedtext」，才是真的「播放器不肯发」；而「0ms 就失败」说明
+  是轨道表/播放器 API 的问题。
+
+`is_translateable: false` 不再当硬闸门——这个字段来自内部 API，拼写和取值都不稳，
+拿它拦住只会把最后一条路也堵掉；真翻译不了就是 1.5s 超时，代价远小于「明明有字幕却报没有」。
 
 - 代价：截取期间**字幕会短暂出现在画面上**，所以由 `prefs.autoSwitchTrack`（默认开）控制
 - 面板（`get_panel`）永远只返回**视频默认轨**，params 里也没有语言位 ——
   所以「切语言」这件事面板做不到，只有播放器轨道这条路
 - 语言匹配用 `langMatches`：`zh-Hant` 能匹配请求的 `zh-Hans`（主语言相同）
 - 截到语言不符的响应一律当失败：`detail` 会写成「在播放器里把字幕语言切成目标语言后再重试」
+
+### 没有原生字幕面板的视频：借播放器发一次 timedtext
+
+有些视频**有字幕、但没有「Show transcript」面板**（`ytInitialData` 里连
+`engagement-panel-searchable-transcript` / `getTranscriptEndpoint` 都没有）。
+真实案例 `K7Q6i3GW_ok`：只有一条 `en` ASR 轨、`defaultAudioLanguage` 为空。
+
+对这种页面，前面几层注定全军覆没：
+
+| 层 | 结果 |
+| --- | --- |
+| `get_panel` | 200，960 字节，**0 段**（面板不存在，只有 `responseContext`） |
+| 裸请求 `baseUrl` | 200 + **空 body**（POT 生效） |
+| DOM 预览/兜底 | 没有面板，页面上没有字幕文字 |
+
+所以同音频模式（没指定产出语言）的拦截层现在这样走：
+
+```
+先短等 900ms（页面自己可能已经发过 get_panel / timedtext）→ 有就直接用
+  └─ 没有，且 prefs.autoSwitchTrack
+       → 按语言偏好从播放器轨道表挑一条（pickPlayerTrack，同 pickTrack 的打分）
+       → setOption('captions','track', 该轨道) → 截带 POT 的 timedtext
+       → finally 还原（原来有轨道就切回，原来 CC 关着就点 CC 按钮关掉）
+```
+
+判据只看「手上有没有完整响应」，所以原生面板能用的视频**不会**走到切轨这一步
+（不会在画面上闪字幕）；只有确实拿不到面板数据的视频才多花这一次切轨。
 
 > **面板的开合策略**。`structured`（直连 `get_transcript`，完全不点任何东西）永远是第一步；
 > 只有它失败时才点开面板逼请求。若页面上残留着旧版本留下（或用户自己点开）的面板，
@@ -402,46 +469,78 @@ InnerTube 探不到轨道，而页面上躺着 376 行完整字幕。现在这�
 - **都不选中 = 同音频**（默认）：不翻译，用视频自己的字幕轨道（通常是 ASR 原声）。
 - 选中某个语言就切过去；**再点一次已选中的按钮**回到同音频。
 
-**只有视频确实自带该语言字幕时，对应按钮才可点。** 判据是 `readAvailableLangs(win)`：
+判据是 `readAvailableLangs(win)`，它只报**原生** `captionTracks` 的语言：
 
 ```
 availableLangs = 原生 captionTracks 的语言      ← 只有这个
 ```
 
-- 原生中文轨道有 → `中` 可点；没有 → `中` **置灰**，悬停提示「这个视频没有中文字幕」；
-- 中/英都没有（例如只有日文字幕、或视频无字幕）→ **整组隐藏**；
+- 有任意一条轨道 → 站点支持机翻（YouTube）时 `中`/`EN` **都可点**：没有原生轨就走播放器机翻；
+- 只有日文字幕这类「中/英都没有原生轨」的情况 → 依然可点，靠机翻产出；
+- **一条轨道都没有**（视频无字幕）→ 整组隐藏，不给点了没反应的按钮；
 - `playerResponse.videoDetails.videoId` 对不上当前页时返回空数组，避免切页瞬间拿上一个视频的轨道去建按钮。
 
-> 早先这里把 `translationLanguages`（YouTube 声称能机翻到的语言）也算进可用性，
-> 结果按钮显示可点、点下去却拿不到中文——`tlang` 请求被签名/POT 挡掉，或服务端
-> 直接忽略 `tlang` 返回原声轨道。对用户来说就是「按钮是假的」。
-> 现在只报**能保证拿到**的语言：视频自带的轨道。
+> 早先 `中` 只在有原生中文轨时才可点，因为 `&tlang=` 必被签名/POT 挡掉，
+> 点了也只会拿回原声轨道 —— 那才是「假按钮」。现在机翻由**播放器**自己发
+> （`translationLanguage`，见「主动切轨」），所以按钮按「机翻也能出」来判定。
 
-按钮状态与抓取行为必须一致：偏好是全局记住的，换了条视频可能给不了你选的语言，
-这时 `pickUsableChoice()` 会退回「同音频」，按钮也显示为未选中 —— 不会出现
-「按钮没选中、实际却在请求翻译」这种对不上的情况。
-
-这份可用语言由 session 在 `reconcile()` 里每 500ms 校正一次（`playerResponse` 通常比地址栏晚一步就绪），写进 `PanelState.availableLangs`，面板据此渲染。
+**语言表在扩展端必须过桥读。** content script 跑在 ISOLATED world，
+`ytInitialPlayerResponse` / `#movie_player` 上的 JS 属性一概看不见 —— 直接读永远是空数组。
+后果不只是「按钮不出现」：`pickUsableChoice()` 对空表刻意不降级，于是用户上次选的
+「中文」会被套到**每一个**视频上，全被机翻成中文。所以：
+`READ_LANGS` 桥（MAIN world）→ 按 videoId 缓存 → `reconcile()` 每 500ms 校正一次；
+抓取前还会 **await 到真实语言表**（最多 ~600ms，`resolvePlan()`），抓取与缓存读取共用
+同一份 plan，不会出现「面板写着中文、命中却是英文缓存」。
 
 解析规则（`src/core/langs.ts` 的 `resolveLangPlan`）：
 
-| 选择    | 轨道偏好顺序                                     | 是否翻译                       |
-| ------- | ------------------------------------------------ | ------------------------------ |
-| 同音频  | 浏览器语言 → zh → en                             | 否                             |
-| 中文    | `zh-Hans` → `zh-Hant` → `zh` → `zh-CN` → `zh-TW` | 否（按钮只在有原生中文时可点） |
-| English | `en`                                             | 否（按钮只在有原生英文时可点） |
+| 选择    | 轨道偏好顺序                                       | 是否翻译                   |
+| ------- | -------------------------------------------------- | -------------------------- |
+| 同音频  | **视频音轨自己的字幕** → 浏览器语言 → zh → en      | 否（默认，用视频自己的轨） |
+| 中文    | `zh-Hans` → `zh-Hant` → `zh` → `zh-CN` → `zh-TW`   | 有原生用原生，没有才机翻   |
+| English | `en`                                               | 有原生用原生，没有才机翻   |
 
-`tlang` 机翻的代码仍保留在 `tryTrack` 里（选中的轨道确实不匹配目标语言时才会拼上），
-但 UI 不会再引导用户走到那条路——它能否成功取决于视频与 YouTube 的签名策略，无法保证。
+**「同音频」跟随视频，不跟随浏览器。** 优先顺序由 `readOwnCaptionLangs()` 给出：
 
-**只要视频本身有该语言的原生字幕，就用原生的**（质量比机器翻译好）；没有才把 `&tlang=` 拼到 timedtext URL 上让 YouTube 机翻。
+```
+playerCaptionsTracklistRenderer.audioTracks[defaultAudioTrackIndex].captionTrackIndices
+  → 这些字幕轨的语言（默认音轨自己的，别的音轨的是翻译品）
+  → 音轨语言（audioTrackId 形如 `zh-Hant.4`，没有就用 defaultAudioLanguage）
+```
+
+中文浏览器打开日文视频时，按浏览器语言会先去要中文（拿不到就机翻），那并不是视频的听写。
+`preferOwnLangs()` 把上面这份顺序插到 `plan.langs` 最前面（只在 `tlang` 为空时生效）。
+
+> `K7Q6i3GW_ok` 拆开看是这样的：`audioTracks` 有两条 —— `zh-Hant.4`（中文原声，
+> 默认）和 `en-US.10`（YouTube 自动配音），两条都只挂了**同一条** `en` ASR
+> （`captionTrackIndices: [0]`，名字就是 "English (auto-generated)"）。
+> 也就是说这条视频 YouTube **没有给中文听写**，能拿到的只有那条英文轨；
+> 中文只能靠机翻。这不是我们没找，是数据里就没有。
+
+`&tlang=` 自己拼**一定失败**（签名/POT 绑定 `video+lang+kind`，实测 429），所以翻译只有一条路：
+**让播放器发**——给轨道对象设 `translationLanguage`（见上文「主动切轨」）。
+`tryTrack` 里保留的 `&tlang=` 代码只在远程层生效，因此 YouTube 端不再把远程层提到最前。
+
+**只要视频本身有该语言的原生字幕，就用原生的**（质量比机器翻译好）；没有才走播放器机翻。
 
 几个配套细节：
 
 - 切语言会**强制重抓**（`load(true)`）并先清空旧行，不会让你盯着英文界面以为切失败；
-- **要翻译时必须让远程层先上**。被动拦截层、结构化源和 DOM 预览只能给视频原文，如果先命中就会出现「切回中文却显示英文」而状态还是 ready。所以 `harvestTranscript` 收到 `preferRemote` 时会先把远程层提上来，拦截层会拒绝语言不符的捕获（`capture.lang !== tlang`）；结构化源**照常执行**，只在 `needsTranslation`（视频确实没有目标语言轨道）时用 `langMatches` 过滤掉原文结果 —— 不再因为「选了目标语言」就整条跳过主路径；
+- **不再「要翻译就先问远程层」**（YouTube 端已不传 `preferRemote`）：那条路必 429，
+  排在最前只会每次白花一次请求，并把最终错误码污染成 `RATE_LIMITED`（用户看到
+  「请求过于频繁」，而不是真实原因）。现在改成**每层自己守住语言**：
+  - 结构化源（`get_panel`）只给默认轨 → `panelLangSatisfies()` 判语言，**语言未知也算不满足**
+    （只有 ASR 轨、`defaultAudioLanguage` 缺失的视频很常见，例如 `K7Q6i3GW_ok`）；
+  - 拦截层靠 `satisfiesLang()` 拒绝语言不符的捕获；
+  - 真的缺目标语言时，拦截层用播放器的机翻补上（`translationLanguage`）；
 - 缓存按语言分开存（`cacheKey` 里含语言），读的时候也按目标语言过滤，所以「切中文」不会命中上次的英文；
-- 拦截层（`get_transcript`）和结构化源拿到的永远是**视频原声语言**，没法翻译。这两层命中时，底栏显示的语言徽标会是实际语言（例如 `EN`），和按钮上的选择不一致就说明「这条视频没有你要的语言，显示的是原文」。
+- 面板 / 拦截层拿到的默认轨如果语言和选择不一致，底栏的语言徽标会显示**实际语言**
+  （例如 `EN`），一眼就能看出「这条视频没有你要的语言，显示的是原文」；
+- **主/备分工**：`get_panel`（即原 Show transcript 那条）永远是主路径；只有「用户指定了
+  目标语言、面板又给不了这个语言」时，拦截层才动播放器的 CC 轨道去机翻。选「同音频」
+  时全程不碰 CC，画面上不会闪字幕；
+- 语言选择是**全局记忆**的（`prefs.lang`）：选了「中文」就表示「能翻的都给我中文」，
+  新视频同样适用。再点一次已选中的按钮即回到「同音频」。
 
 ### 缓存语义（会不会串视频）
 
@@ -470,6 +569,12 @@ videoId   B  ✓ 与当前页一致
 `EMPTY_200` / `POT_ENFORCED` / `RATE_LIMITED` / `AGE_RESTRICTED` / `NO_CAPTION_TRACK` / `SELECTOR_MISS` / `NETWORK_ERROR` / `UNKNOWN`
 
 每层失败都写入 `failures[]`，面板底栏「诊断 N」可以展开看每一层的错误码与耗时——排查时先看这个，再决定是重试还是等更新。
+
+> 扩展端的 `GET_TRANSCRIPT` / `HARVEST_REMOTE` 现在**把 `failures[]` 原样带回来**
+> （RPC 的 reject 只有 message，`code` 一丢就会把「`get_panel` 200 但 0 段」误记成
+> `NETWORK_ERROR`）。诊断里出现 `EMPTY_200 · 200 但 0 段（N 字节）` 时，说明
+> 这条视频**没有原生字幕面板**（`ytInitialData` 里没有 `engagement-panel-searchable-transcript`），
+> 只能走播放器那条路。
 
 最终展示的错误码取**最后一层**的分类：结构化源没轨道报 `NO_CAPTION_TRACK`（视频没字幕），拦截超时报 `EMPTY_200`，远程被限流报 `RATE_LIMITED` —— 这些情况的处理方式完全不同。DOM 预览不产生最终结果，因此不再有 `SELECTOR_MISS` 误报。
 

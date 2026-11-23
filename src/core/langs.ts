@@ -53,12 +53,36 @@ export function resolveLangPlan(choice: LangChoice): LangPlan {
  * 实际可用的语言选择。
  *
  * 偏好是全局的（记住你上次选了中文），但某条视频可能给不了中文。
- * 这时必须按「同音频」处理，否则按钮显示未选中、实际却在请求机翻，
- * 界面与行为不一致。available 为空表示还没读到轨道信息，此时不擅自降级。
+ * available 为空表示还没读到轨道信息，此时不擅自降级。
+ *
+ * `canTranslate` 为真表示这个站点确实能把任意轨道机翻到目标语言
+ * （YouTube 走播放器的 `translationLanguage`，见 `player-track.ts`）。
+ * 这时**不需要**目标语言的原生轨：以前「没有原生轨就降级成同音频」是因为
+ * `&tlang=` 一律被挡，拿到的是假的；现在机翻真的能出结果，点了中文就该给中文，
+ * 降级反而会让按钮显示与实际内容对不上。
  */
-export function pickUsableChoice(choice: LangChoice, available: readonly string[]): LangChoice {
+export function pickUsableChoice(
+  choice: LangChoice,
+  available: readonly string[],
+  canTranslate = false,
+): LangChoice {
   if (choice === 'auto' || available.length === 0) return choice;
+  if (canTranslate) return choice;
   return available.some((code) => langMatches(code, choice)) ? choice : 'auto';
+}
+
+/**
+ * 「同音频」模式：把**与视频音轨匹配**的语言排到最前面。
+ *
+ * 原来的顺序来自浏览器语言（zh → en）：中文浏览器打开日文视频会先去要中文，
+ * 拿不到就只剩机翻/失败。视频自己有哪条听写就先用哪条，才是「跟随视频」。
+ *
+ * 只在 tlang 为空的方案上生效 —— 明确要中文/英文时不能被视频语言带偏。
+ */
+export function preferOwnLangs(plan: LangPlan, own: readonly string[]): LangPlan {
+  if (plan.tlang || own.length === 0) return plan;
+  const rest = plan.langs.filter((lang) => !own.some((code) => langMatches(code, lang)));
+  return { ...plan, langs: [...own, ...rest] };
 }
 
 /** 轨道语言是否已满足目标（按主语言比较：zh-Hant 也算中文）。 */

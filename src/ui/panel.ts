@@ -42,6 +42,35 @@ export function isStalePanelState(
   return videoId !== pageVideoId;
 }
 
+/** 句末标点：中文 。！？ + 英文 .!?…，允许后面跟收尾引号/括号 */
+const PARA_END_RE = /[。！？!?.…][”’"'）)」』】]?$/;
+/** 两条字幕之间静了这么久，就当成换了段 */
+const PARA_GAP_MS = 1200;
+
+/**
+ * 哪几行是段落起点。
+ *
+ * 字幕是逐条下发的，本身没有段落信息。这里只用两个信号推断：
+ *   ① 上一条以句末标点收尾 —— 句子完了，下一行自然是新段；
+ *   ② 两条之间静默超过 1.2s —— 说话人停顿时通常也换意群。
+ * 第 0 条永远不算段首（列表顶上不需要额外留白）。
+ *
+ * 纯函数，方便单测：判错只会让留白多一行或少一行，不影响内容。
+ */
+export function paragraphStarts(lines: readonly TranscriptLine[]): boolean[] {
+  const flags = new Array<boolean>(lines.length).fill(false);
+  for (let i = 1; i < lines.length; i += 1) {
+    const prev = lines[i - 1];
+    const current = lines[i];
+    if (PARA_END_RE.test(prev.text.trim())) {
+      flags[i] = true;
+      continue;
+    }
+    if (prev.dur > 0 && current.start - (prev.start + prev.dur) > PARA_GAP_MS) flags[i] = true;
+  }
+  return flags;
+}
+
 export interface PanelOptions {
   client: TranscriptClient;
   /** sidebar = 嵌进 YouTube 右栏的卡片；sidepanel = 扩展侧栏；overlay = 旧浮层 */
@@ -110,6 +139,8 @@ export function createPanel(options: PanelOptions): PanelHandle {
   let copied = false;
   let indexMap: number[] = [];
   let positions: number[] = [];
+  /** 与 viewRows() 一一对应的「段首」标记，行渲染据此决定要不要多留白 */
+  let paraFlags: boolean[] = [];
   /** 上一次交给虚拟列表的行数，用于判断需要 setCount 还是 refresh */
   let listCount = 0;
   let listKey = '';
@@ -118,6 +149,8 @@ export function createPanel(options: PanelOptions): PanelHandle {
   let lastActive = -1;
   let loadedFor = '';
   let followedKey = '';
+  /** 首屏居中的 rAF：快速切页时连开两帧会堆叠，得能取消 */
+  let followFrame = 0;
   let stopTheme: (() => void) | null = null;
   /** 面板状态是否属于「别的视频」——为真时一律不渲染旧内容 */
   let staleNow = false;
@@ -144,11 +177,19 @@ export function createPanel(options: PanelOptions): PanelHandle {
 
   /**
    * 这条视频能不能出某种语言的字幕。
-   * availableLangs = 原生轨道 ∪ YouTube 支持的翻译目标；空数组表示还没读到或没有字幕，
+   *
+   * `availableLangs` 只有**原生轨道**；视频一条字幕都没有时是空数组，
    * 这时一个语言按钮都不显示 —— 给一个点了没反应的按钮更糟。
+   *
+   * 站点支持机翻（YouTube 走播放器的 `translationLanguage`）时，
+   * 只要有任意一条轨道就能机翻出目标语言，所以按钮照样可点：
+   * 「中文」以前因为 `&tlang=` 必被挡而置灰，现在机翻真能出结果。
    */
+  const canTranslate = (): boolean =>
+    caps().machineTranslate && state.availableLangs.length > 0;
+
   const hasLang = (target: 'zh' | 'en'): boolean =>
-    state.availableLangs.some((code) => langMatches(code, target));
+    canTranslate() || state.availableLangs.some((code) => langMatches(code, target));
 
   /**
    * 章节高亮按「真实播放位置落在哪个章节区间」算。
@@ -179,10 +220,12 @@ export function createPanel(options: PanelOptions): PanelHandle {
     onSelectLang: (choice) => setPrefs({ lang: getPrefs().lang === choice ? 'auto' : choice }),
     onToggleView: () => {
       if (state.chapters.length === 0) return;
-      needle = '';
-      toolbar.setQuery('');
+      // 换视图等于换数据源，搜索必须清掉（游标与滚动位置也一起复位）
+      applyQuery('');
       setPrefs({ view: getPrefs().view === 'chapters' ? 'lines' : 'chapters' });
     },
+    onFontSize: (size) => setPrefs({ fontSize: size }),
+    onLineSpacing: (spacing) => setPrefs({ lineSpacing: spacing }),
     onCopy: () => void handleCopy(),
     onExport: (format) => handleExport(format),
   });
@@ -276,6 +319,7 @@ export function createPanel(options: PanelOptions): PanelHandle {
       active: original === activeForView(),
       showTimestamps: showTimestamps(),
       needle,
+      paraStart: paraFlags[original] === true,
       // 只有章节视图放截图：字幕动辄几千行，逐行拉雪碧图没有意义
       thumb: currentView() === 'chapters' ? frameAt(state.storyboard, line.start) : null,
       onSeek: (seconds) => client.seek(seconds),
@@ -291,6 +335,9 @@ export function createPanel(options: PanelOptions): PanelHandle {
     indexMap.forEach((original, position) => {
       positions[original] = position;
     });
+    // 章节视图里每条本身就是一块，全按段首排；字幕视图只能靠标点/停顿推断
+    paraFlags =
+      currentView() === 'chapters' ? rows.map((_, index) => index > 0) : paragraphStarts(rows);
   }
 
   /**
@@ -373,12 +420,14 @@ export function createPanel(options: PanelOptions): PanelHandle {
       chaptersAvailable: state.chapters.length > 0,
       canChapters: caps().chapters,
       machineTranslate: caps().machineTranslate,
-      // 视频给不了所选语言时按「同音频」显示：按钮不选中，与实际抓取行为一致
-      lang: pickUsableChoice(getPrefs().lang, state.availableLangs),
+      // 站点能机翻时不做降级：按钮选中什么，抓取就去要什么（两者必须一致）
+      lang: pickUsableChoice(getPrefs().lang, state.availableLangs, caps().machineTranslate),
       // 中/英都没有就整组隐藏；有哪个就哪个可点，缺的那个置灰
       showLangGroup: hasLang('zh') || hasLang('en'),
       zhAvailable: hasLang('zh'),
       enAvailable: hasLang('en'),
+      fontSize: getPrefs().fontSize,
+      lineSpacing: getPrefs().lineSpacing,
       copied,
       // 章节是页面独立数据：字幕抓取失败时仍可查看/复制章节
       disabled: staleNow || !(viewRows().length > 0),
@@ -507,8 +556,14 @@ export function createPanel(options: PanelOptions): PanelHandle {
       if (followKey !== followedKey && viewRows().length > 0 && activeForView() >= 0) {
         followedKey = followKey;
         const position = positions[activeForView()];
-        // 等首屏行测量完再跳，否则用的是估算高度
-        if (position >= 0) requestAnimationFrame(() => list.scrollToIndex(position, 'center'));
+        // 等首屏行测量完再跳，否则用的是估算高度；连续切页会连开两帧，先撤掉上一帧
+        if (position >= 0) {
+          if (followFrame) cancelAnimationFrame(followFrame);
+          followFrame = requestAnimationFrame(() => {
+            followFrame = 0;
+            list.scrollToIndex(position, 'center');
+          });
+        }
       }
       return;
     }
@@ -522,7 +577,10 @@ export function createPanel(options: PanelOptions): PanelHandle {
     if (active !== lastActive) {
       lastActive = active;
       const position = positions[active];
-      if (position >= 0 && Date.now() - lastManualScroll > 3000) list.scrollToIndex(position);
+      // 只在当前行真的离开视口时才滚：它还在屏幕上时突然居中，会把人从正在读的句子拽走
+      if (position >= 0 && Date.now() - lastManualScroll > 3000 && !list.isVisible(position)) {
+        list.scrollToIndex(position);
+      }
     }
   }
 
@@ -536,7 +594,21 @@ export function createPanel(options: PanelOptions): PanelHandle {
     });
   };
 
+  /* ---------------- 阅读排版（字号 / 行距） ---------------- */
+  /**
+   * 只在根节点挂 class：字号、行高、行宽全从 CSS 变量派生，
+   * 所以切档既不需要重建任何一行，也不必进 render 的缓存 key。
+   */
+  const applyReading = (): void => {
+    const prefs = getPrefs();
+    root.classList.toggle('ytt-fs-sm', prefs.fontSize === 'sm');
+    root.classList.toggle('ytt-fs-lg', prefs.fontSize === 'lg');
+    root.classList.toggle('ytt-lh-tight', prefs.lineSpacing === 'tight');
+    root.classList.toggle('ytt-lh-loose', prefs.lineSpacing === 'loose');
+  };
+
   let lastLang = getPrefs().lang;
+  let lastReading = `${getPrefs().fontSize}|${getPrefs().lineSpacing}`;
   const unsubscribePrefs = subscribePrefs(() => {
     applyTheme();
     // 换语言 = 换内容：必须重抓。缓存按语言分开存，所以这里要强制绕过缓存，
@@ -544,6 +616,14 @@ export function createPanel(options: PanelOptions): PanelHandle {
     if (getPrefs().lang !== lastLang) {
       lastLang = getPrefs().lang;
       void client.load(true);
+    }
+    const reading = `${getPrefs().fontSize}|${getPrefs().lineSpacing}`;
+    if (reading !== lastReading) {
+      lastReading = reading;
+      applyReading();
+      // 行高变了，虚拟列表里实测并缓存的行高全部作废 ——
+      // 不重测的话偏移量还是旧值，行会互相压在一起
+      list.relayout();
     }
     render();
   });
@@ -554,6 +634,7 @@ export function createPanel(options: PanelOptions): PanelHandle {
   });
 
   applyTheme();
+  applyReading();
   void loadPrefs();
   render();
 
@@ -565,6 +646,7 @@ export function createPanel(options: PanelOptions): PanelHandle {
       unsubscribe();
       unsubscribePrefs();
       stopTheme?.();
+      if (followFrame) cancelAnimationFrame(followFrame);
       toolbar.destroy();
       statusBar.closePopover();
       list.destroy();

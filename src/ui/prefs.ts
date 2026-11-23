@@ -2,6 +2,10 @@ import type { LangChoice } from '../core/langs';
 import type { ContentView } from '../core/types';
 
 export type ThemePref = 'system' | 'light' | 'dark';
+/** 正文字号档位：阅读场景必须让人自己调 */
+export type FontSizePref = 'sm' | 'md' | 'lg';
+/** 行距档位：中文长文 1.5 太挤、1.85 太散，默认取中间 */
+export type LineSpacingPref = 'tight' | 'normal' | 'loose';
 
 export interface Prefs {
   theme: ThemePref;
@@ -11,6 +15,14 @@ export interface Prefs {
   view: ContentView;
   /** 想要哪种语言的字幕：auto = 同音频（原声轨道） */
   lang: LangChoice;
+  /**
+   * 正文字号 / 行距档位。
+   *
+   * 只落成根节点上的两个 class（见 styles.css 的 ytt-fs-* / ytt-lh-*），
+   * 字号行高等全部从 CSS 变量派生 —— 切档时不需要重建任何一行。
+   */
+  fontSize: FontSizePref;
+  lineSpacing: LineSpacingPref;
   /**
    * 目标语言拿不到时，是否允许我们**主动把播放器的 CC 轨道切过去**，
    * 截下播放器自己算好 POT 的 timedtext，然后再切回来（字幕会短暂出现一下）。
@@ -25,6 +37,8 @@ const DEFAULT_PREFS: Prefs = {
   lang: 'auto',
   // 默认开：多语言就这一条能自动拿到「非默认轨道」全文的路径，关掉就只能手动切
   autoSwitchTrack: true,
+  fontSize: 'md',
+  lineSpacing: 'normal',
 };
 const STORAGE_KEY = 'ytt-prefs';
 

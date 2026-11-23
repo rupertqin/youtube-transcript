@@ -1,3 +1,4 @@
+import { langMatches } from '../langs';
 import type { ErrorCode, TranscriptLine } from '../types';
 import { SELF_FETCH } from './intercept';
 import { parseGetTranscript } from './parse/transcript';
@@ -224,6 +225,21 @@ export interface PanelOutcome {
   lines: TranscriptLine[];
   /** 这条轨道的语言码；推不出来就是 null（绝不编造） */
   lang: string | null;
+}
+
+/**
+ * 面板拿到的这条轨道，能不能满足「指定的产出语言」。
+ *
+ * 面板永远只给**默认轨道**（params 里没有语言位），所以指定了别的语言时拿它顶就是
+ * 「切中文显示英文」。语言**未知**（`defaultAudioLanguage` 缺失，只有 ASR 轨的视频
+ * 很常见）同样算不满足 —— 不能因为「读不出来」就当成「读对了」。
+ */
+export function panelLangSatisfies(
+  panelLang: string | null | undefined,
+  tlang: string | null | undefined,
+): boolean {
+  if (!tlang) return true;
+  return Boolean(panelLang && langMatches(panelLang, tlang));
 }
 
 /**

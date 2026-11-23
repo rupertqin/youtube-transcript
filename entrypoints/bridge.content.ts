@@ -3,10 +3,16 @@ import { fetchPanelTranscript } from '../src/core/harvest/get-panel';
 import { installTimedTextHook } from '../src/core/harvest/intercept';
 import { runRemoteSources } from '../src/core/harvest/sources';
 import { interceptWithAutoSwitch } from '../src/core/harvest/player-track';
-import { readPlayerResponse, readStoryboardSpec } from '../src/core/harvest/player';
+import {
+  readAudioTrackLang,
+  readAvailableLangs,
+  readOwnCaptionLangs,
+  readPlayerResponse,
+  readStoryboardSpec,
+} from '../src/core/harvest/player';
 import { readBiliPageState } from '../src/core/site/bilibili/page-state';
 import { log } from '../src/core/log';
-import type { HarvestContext } from '../src/core/types';
+import type { ErrorCode, HarvestContext } from '../src/core/types';
 import { createBridgeEndpoint } from '../src/platform/bridge.chrome-main-world';
 
 /**
@@ -38,6 +44,27 @@ export default defineContentScript({
     // 章节截图用的雪碧图规格：playerResponse 只在 MAIN world 存在
     endpoint.handle('STORYBOARD', () => readStoryboardSpec(window));
 
+    /**
+     * 这条视频有哪些字幕语言。
+     *
+     * ISOLATED world 读不到 `ytInitialPlayerResponse`（页面 JS 全局），直接读永远是
+     * 空数组 —— 语言按钮因此从不出现，`pickUsableChoice()` 也永远不知道能不能降级。
+     * 过桥是唯一可靠的办法。
+     */
+    endpoint.handle('READ_LANGS', (raw) => {
+      const payload = raw as { videoId?: string } | null;
+      const videoId = payload?.videoId ?? '';
+      const response = readPlayerResponse(window);
+      return {
+        // 自证归属：切页瞬间播放器可能还挂着上一个视频的响应
+        videoId: response?.videoDetails?.videoId ?? null,
+        langs: readAvailableLangs(window, videoId || undefined),
+        // 「同音频」优先顺序：默认音轨自己的字幕 → 音轨语言
+        own: readOwnCaptionLangs(window, videoId || undefined),
+        defaultLang: readAudioTrackLang(window, videoId || undefined),
+      };
+    });
+
     // 用户手动打开原生 Transcript 面板时，YouTube 会自己请求 get_transcript；
     // 立刻通知 content script 重新加载，不需要用户再点一次「重试」
     hook.onCapture((capture) => {
@@ -56,6 +83,7 @@ export default defineContentScript({
       const controller = new AbortController();
       // 主路径必须快：结构化源排在最前，卡住会拖慢整条链
       const timer = setTimeout(() => controller.abort(), 8_000);
+      const started = Date.now();
       try {
         // 就直接问 get_panel：2026 面板唯一的数据源，一次请求拿全部分段
         const outcome = await fetchPanelTranscript({
@@ -65,16 +93,32 @@ export default defineContentScript({
           signal: controller.signal,
           timeoutMs: 6_000,
         });
-        if (!outcome) return null;
         return {
           lines: outcome.lines,
-          source: 'innertube',
+          source: 'innertube' as const,
           track: outcome.lang
             ? { baseUrl: `structured:${videoId}`, languageCode: outcome.lang }
             : undefined,
           showTimestamps: true,
           failures: [],
           complete: true,
+        };
+      } catch (error) {
+        // 失败也把分类带回去：RPC 的 reject 只剩 message，code 一丢，
+        // ISOLATED 侧就会把「200 但 0 段」误记成 NETWORK_ERROR。
+        const code = (error as { code?: ErrorCode }).code ?? 'UNKNOWN';
+        return {
+          lines: [],
+          source: 'innertube' as const,
+          showTimestamps: true,
+          failures: [
+            {
+              source: 'innertube' as const,
+              code,
+              ms: Date.now() - started,
+              detail: (error as Error)?.message ?? String(error),
+            },
+          ],
         };
       } finally {
         clearTimeout(timer);
@@ -98,7 +142,8 @@ export default defineContentScript({
 
       try {
         const outcome = await runRemoteSources({ win: window, ctx });
-        if (!outcome || outcome.lines.length === 0) return null;
+        if (!outcome) return null;
+        // 0 行也要回传：每一层的失败码（POT 空 body / 无轨道）是诊断里唯一的信息源
         return {
           lines: outcome.lines,
           source: outcome.source,

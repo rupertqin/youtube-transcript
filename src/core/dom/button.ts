@@ -228,3 +228,25 @@ export function flashEntryButton(doc: Document, message: string, ms = 2000): voi
 export function removeEntryButton(doc: Document, id: string = ENTRY_BUTTON_ID): void {
   doc.getElementById(id)?.remove();
 }
+
+/**
+ * 入口按钮该做什么：移除 / 保留 / 新建。
+ *
+ * 「按钮只出现在有视频的页面」这条规则就落在这里 —— 首页、搜索页、频道页
+ * 没有 `?v=`，动作恒为 remove；按钮被站点重建 masthead 冲掉（不在文档里）时
+ * 必须重建，否则就是「刷新一次才看到按钮」。
+ *
+ * 抽成纯函数是为了能直接单测这条规则本身（DOM 挂载在 node 里没法跑）。
+ */
+export type EntryButtonAction = 'remove' | 'keep' | 'insert';
+
+export function entryButtonAction(input: {
+  /** 地址栏此刻有视频 id */
+  hasVideo: boolean;
+  /** 页面上现有的按钮；已被站点摘掉时调用方传 null */
+  button: Element | null;
+}): EntryButtonAction {
+  if (!input.hasVideo) return 'remove';
+  if (!input.button || input.button.isConnected !== true) return 'insert';
+  return 'keep';
+}

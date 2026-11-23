@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { entryButtonAction } from '../src/core/dom/button';
 import { collapseDuplicates } from '../src/core/dom/dedupe';
 import { countTimecodes, parseTimecodeRows } from '../src/core/dom/text-rows';
 import { looksLikeTranscript } from '../src/core/lines';
@@ -163,6 +164,30 @@ describe('缓存键', () => {
   it('带结构版本前缀：判定规则一改，旧条目自动失效', () => {
     expect(cacheKey('youtube', 'abcdefghijk')).toMatch(/^v\d+\|youtube\|abcdefghijk\|na\|manual$/u);
     expect(cacheKey('youtube', 'abcdefghijk', 'en', 'asr')).toMatch(/\|en\|asr$/u);
+  });
+});
+
+/**
+ * 入口按钮的显隐规则：按钮只该出现在**有视频**的页面。
+ *
+ * 两个真实故障都在这条规则上：首页 → 观看页时按钮没出现（要刷新），
+ * 以及切页后按钮留在首页。挂载层每 800ms 用这个函数对一次账。
+ */
+describe('入口按钮显隐', () => {
+  const btn = (connected: boolean) => ({ isConnected: connected }) as unknown as Element;
+
+  it('首页/搜索页/频道页没有视频 id → 移除', () => {
+    expect(entryButtonAction({ hasVideo: false, button: btn(true) })).toBe('remove');
+    expect(entryButtonAction({ hasVideo: false, button: null })).toBe('remove');
+  });
+
+  it('观看页但按钮还没插、或被站点重建 masthead 冲掉 → 重建', () => {
+    expect(entryButtonAction({ hasVideo: true, button: null })).toBe('insert');
+    expect(entryButtonAction({ hasVideo: true, button: btn(false) })).toBe('insert');
+  });
+
+  it('观看页且按钮健在 → 不动它（避免无谓的 DOM 重插把点击态冲掉）', () => {
+    expect(entryButtonAction({ hasVideo: true, button: btn(true) })).toBe('keep');
   });
 });
 

@@ -25,27 +25,77 @@
   --ytt-card-border: rgba(255, 255, 255, 0.28);
   --ytt-text: #f1f1f1;
   --ytt-text-dim: #aaaaaa;
-  --ytt-text-mute: #717171;
+  /* 最暗一档承载 11-12px 的提示与时间戳，必须过 4.5:1。
+     #717171 在 #0f0f0f 上只有 3.9:1，中文小字会糊成一团。 */
+  --ytt-text-mute: #8a8a8a;
+  /* 字幕正文的颜色，和界面文字分开配：正文是「要读的内容」，
+     工具栏/状态栏是「控件标签」，两者可以各自调而不互相牵连。
+     深色主题维持原样：激活行亮、非激活行灰。浅色主题在 .ytt-light 里覆盖成纯黑。 */
+  --ytt-transcript: #f1f1f1;
+  --ytt-transcript-idle: #aaaaaa;
   --ytt-hover: rgba(255, 255, 255, 0.08);
-  /* 时间戳底色：比 --ytt-surface 再淡一档，做成小胶囊而不是色块 */
-  --ytt-time-bg: rgba(255, 255, 255, 0.09);
   --ytt-accent: #ff0000;
   --ytt-accent-2: #ff0000;
   --ytt-accent-soft: rgba(255, 0, 0, 0.12);
-  --ytt-highlight: rgba(255, 0, 0, 0.2);
+  /* 搜索命中用琥珀：和「正在播放」的 accent 红一眼分开，
+     否则在激活行里高亮几乎看不见 */
+  --ytt-highlight: rgba(255, 193, 7, 0.22);
   --ytt-shadow: 0 18px 50px -12px rgba(0, 0, 0, 0.7);
   --ytt-ok: #3ea6ff;
   --ytt-warn: #fbc02d;
   --ytt-err: #ff4e45;
 
-  /* 与 YouTube 完全一致：Roboto, Arial, sans-serif；正文 14px / 20px。
-     不再显式写中文字体 —— YouTube 自己也是让 sans-serif 回落到系统默认。 */
-  font-family: Roboto, Arial, sans-serif;
+  /* 字体栈写全：不写中文字体等于把字形交给系统赌 ——
+     macOS 落到苹方、Windows 大概率落到宋体，同一份排版两边完全不同。 */
+  --ytt-font-ui: Roboto, "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  /* 界面里的代码/诊断文本走 Tailwind 的 font-mono（纯拉丁，不需要中文字形） */
+  /**
+   * 中文行的字族：显式点名苹方（Windows/Linux 依次落到雅黑 / Noto）。
+   *
+   * 中英文现在**同字号**，靠字距和行距区分：中文行字距放宽、行距按中文的
+   * 1.65 倍；英文行不拉字距、行距收紧（拉丁字母 x 高度小，同样的行距更显松散）。
+   */
+  --ytt-font-cn: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC",
+    "Source Han Sans SC", sans-serif;
+
+  /* 阅读刻度：正文字号只有一个入口，行高由它派生（行宽不设上限，
+     面板多宽就用多宽）。面板按偏好把 ytt-fs-* / ytt-lh-* 挂在根节点上。 */
+  --ytt-fs-body: 14px;
+  /* 中英文同字号；只有时间戳这层辅助信息小一号 */
+  --ytt-fs-en: var(--ytt-fs-body);
+  --ytt-fs-time: calc(var(--ytt-fs-body) * 0.86);
+  --ytt-lh-ratio: 1.65;
+  --ytt-lh: calc(var(--ytt-fs-body) * var(--ytt-lh-ratio));
+  /* 英文行距：同字号下比中文紧 12%（14px → 约 20px），跟着行距档位一起缩放 */
+  --ytt-lh-en: calc(var(--ytt-lh) * 0.88);
+
+  font-family: var(--ytt-font-ui);
   font-size: 14px;
   line-height: 20px;
   color: var(--ytt-text);
   -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
+  /* optimizeLegibility 会给 CJK 做额外整形，几千行虚拟列表白付这笔开销 */
+  text-rendering: auto;
+  /* 中文避头尾：不让 。，、）」 这类字符落在行首 */
+  line-break: strict;
+}
+
+/* 阅读档位：字号 小/标准/大、行距 紧/标准/松。只改变量，不碰 DOM。 */
+.ytt-root.ytt-fs-sm {
+  --ytt-fs-body: 13px;
+}
+
+.ytt-root.ytt-fs-lg {
+  --ytt-fs-body: 16px;
+}
+
+.ytt-root.ytt-lh-tight {
+  --ytt-lh-ratio: 1.5;
+}
+
+.ytt-root.ytt-lh-loose {
+  --ytt-lh-ratio: 1.85;
 }
 
 .ytt-root.ytt-light {
@@ -58,12 +108,79 @@
   --ytt-card-border: rgba(0, 0, 0, 0.28);
   --ytt-text: #0f0f0f;
   --ytt-text-dim: #606060;
-  --ytt-text-mute: #909090;
+  /* 同理：白底上 #909090 只有 3.2:1，压到 #6f6f6f 才有 5:1 */
+  --ytt-text-mute: #6f6f6f;
   --ytt-hover: rgba(0, 0, 0, 0.05);
-  --ytt-time-bg: rgba(0, 0, 0, 0.07);
   --ytt-accent-soft: rgba(255, 0, 0, 0.08);
-  --ytt-highlight: rgba(255, 0, 0, 0.15);
+  --ytt-highlight: rgba(255, 176, 0, 0.3);
   --ytt-shadow: 0 18px 50px -18px rgba(15, 15, 16, 0.3);
+  /* 浅色主题的字幕统一 #0f0f0f：白底上灰字发飘，激活/非激活都按纸面正文处理，
+     「正在播放」只靠左侧竖条和行底色表达，不再靠明暗 */
+  --ytt-transcript: #0f0f0f;
+  --ytt-transcript-idle: #0f0f0f;
+}
+
+/* ------------------------------------------------------------------ *
+ * 正文排版：中文行 / 英文行 / 时间戳三类的字号与字族只在这里定义。
+ * 全部吃变量，切字号档位时只重排、不重建节点。
+ *
+ * 刻意**不放进 @layer components**：行本身的 py-* 是 utilities 层的，
+ * 层的顺序让 utilities 永远赢过 components —— 段首的 padding-top 会被
+ * py-0.5 直接盖掉。未分层的规则才能压住它。
+ * ------------------------------------------------------------------ */
+/* 长 URL / 连续拉丁不能把行撑破 */
+.ytt-line-body {
+  overflow-wrap: anywhere;
+}
+
+.ytt-line-cn {
+  font-family: var(--ytt-font-cn);
+  font-size: var(--ytt-fs-body);
+  line-height: var(--ytt-lh);
+  /* 中英文同字号，靠字距拉开：汉字本身方正，放宽一点才和拉丁行的密度分得开 */
+  letter-spacing: 0.04em;
+  /* 行首标点吃掉自己的前置空白（Chrome 支持，其他浏览器忽略） */
+  text-spacing-trim: trim-start;
+  hanging-punctuation: allow-end;
+}
+
+.ytt-line-en {
+  font-family: var(--ytt-font-ui);
+  font-size: var(--ytt-fs-en);
+  /* 同字号下英文行距更紧：拉丁 x 高度小，用中文的 1.65 倍会显得很散 */
+  line-height: var(--ytt-lh-en);
+  letter-spacing: normal;
+}
+
+.ytt-line-time {
+  font-family: var(--ytt-font-ui);
+  font-size: var(--ytt-fs-time);
+  /* 跟着父行走：写死 23px 会把英文行的紧行距又撑回去 */
+  line-height: inherit;
+  /* 时间戳是拉丁字符，别跟着中文行的字距一起放宽 */
+  letter-spacing: normal;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 段首额外留白：由行高派生，换字号/行距时比例不变 */
+.ytt-row-para {
+  padding-top: calc(var(--ytt-lh) * 0.35);
+}
+
+/* 章节缩略图按首行行高居中，不再写死 3px（英文行字号不同也能对齐） */
+.ytt-thumb {
+  align-self: flex-start;
+  margin-top: calc(var(--ytt-lh) * 0.09);
+}
+
+/* 搜索命中：琥珀底 + 跨行克隆；不加水平内边距，避免相邻高亮块错位 */
+.ytt-root mark.ytt-mark {
+  background: var(--ytt-highlight);
+  color: inherit;
+  border-radius: 3px;
+  padding-inline: 0.08em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
 /* 必须落在 @layer base 里：未分层的规则会盖掉 @layer utilities 的 padding/border/背景 */
@@ -89,6 +206,12 @@
     background: none;
     border: 0;
     outline: none;
+  }
+
+  /* 正文必须能拖选复制：整行是 <button>，不显式声明时部分浏览器会吞掉拖选 */
+  .ytt-root [data-role='text'] {
+    -webkit-user-select: text;
+    user-select: text;
   }
 
   .ytt-root ::selection {

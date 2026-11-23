@@ -3,6 +3,7 @@ import {
   langMatches,
   LANG_CHOICES,
   pickUsableChoice,
+  preferOwnLangs,
   resolveLangPlan,
 } from '../src/core/langs';
 import { buildTimedTextUrl, fetchTimedText } from '../src/core/harvest/timedtext';
@@ -50,12 +51,51 @@ describe('pickUsableChoice：视频给不了就退回同音频', () => {
     expect(pickUsableChoice('zh', ['zh-hant'])).toBe('zh');
   });
 
-  it('视频没有中文时退回同音频，和按钮的禁用状态一致', () => {
+  it('站点不能机翻时：没有中文就退回同音频，和按钮的禁用状态一致', () => {
     expect(pickUsableChoice('zh', ['en', 'ja'])).toBe('auto');
+    expect(pickUsableChoice('zh', ['en', 'ja'], false)).toBe('auto');
+  });
+
+  it('站点能机翻（YouTube 播放器机翻）时不降级：点中文就给中文', () => {
+    expect(pickUsableChoice('zh', ['en'], true)).toBe('zh');
+    expect(pickUsableChoice('en', ['zh-Hans'], true)).toBe('en');
   });
 
   it('还没读到轨道信息时不擅自降级', () => {
     expect(pickUsableChoice('zh', [])).toBe('zh');
+    expect(pickUsableChoice('zh', [], true)).toBe('zh');
+  });
+});
+
+/**
+ * 「同音频」= 跟随视频，不是跟随浏览器。
+ *
+ * 中文浏览器打开日文视频时，按浏览器语言会先去要中文（拿不到就机翻），
+ * 而那并不是视频的听写 —— 必须把视频音轨自己的语言排到最前。
+ */
+describe('preferOwnLangs：同音频优先用视频自己的听写', () => {
+  it('把音轨语言排到最前，其余顺序保留且去重', () => {
+    const next = preferOwnLangs(resolveLangPlan('auto'), ['ja']);
+    expect(next.langs[0]).toBe('ja');
+    expect(next.tlang).toBeNull();
+    expect(new Set(next.langs).size).toBe(next.langs.length);
+  });
+
+  it('音轨是中文时，浏览器偏好的 zh 不会重复出现', () => {
+    const next = preferOwnLangs(resolveLangPlan('auto'), ['zh-hant']);
+    expect(next.langs[0]).toBe('zh-hant');
+    // zh-Hant 与 zh / zh-Hans 主语言相同，只保留一条
+    expect(next.langs.filter((code) => code.startsWith('zh')).length).toBe(1);
+  });
+
+  it('指定了产出语言时不动（不能被视频语言带偏）', () => {
+    const plan = resolveLangPlan('zh');
+    expect(preferOwnLangs(plan, ['ja'])).toEqual(plan);
+  });
+
+  it('没有音轨信息时原样返回', () => {
+    const plan = resolveLangPlan('auto');
+    expect(preferOwnLangs(plan, [])).toEqual(plan);
   });
 });
 

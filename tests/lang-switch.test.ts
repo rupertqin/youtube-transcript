@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { harvestTranscript } from '../src/core/harvest/chain';
 import type { TimedTextHook } from '../src/core/harvest/intercept';
-import { hasNativeTrackFor, readAvailableLangs } from '../src/core/harvest/player';
+import {
+  hasNativeTrackFor,
+  readAudioTrackLang,
+  readAvailableLangs,
+  readOwnCaptionLangs,
+} from '../src/core/harvest/player';
 import { runInterceptSource } from '../src/core/harvest/sources';
 import type { SourceOutcome } from '../src/core/types';
 
@@ -212,6 +217,88 @@ describe('readAvailableLangs：按钮只在有字幕时出现', () => {
   it('归属一致时正常返回', () => {
     const langs = readAvailableLangs(win(response(['en'], ['zh-Hans'], 'NEW')), 'NEW');
     expect(langs).toContain('en');
+  });
+});
+
+/**
+ * 「同音频」该要哪条轨道：跟视频走，不跟浏览器走。
+ *
+ * playerResponse 里 `audioTracks[defaultAudioTrackIndex].captionTrackIndices`
+ * 才是**这条音轨自己的**字幕；其它音轨的字幕（自动配音视频里很常见）是翻译品。
+ */
+describe('readOwnCaptionLangs：视频自己的听写排在最前', () => {
+  const win = (payload: unknown): Window =>
+    ({
+      document: {
+        querySelector: (selector: string) =>
+          selector === '#movie_player' ? { getPlayerResponse: () => payload } : null,
+      },
+    }) as unknown as Window;
+
+  /** 真实形态（K7Q6i3GW_ok）：中文原声 + 英文自动配音，两条音轨都只挂了那条 en ASR。 */
+  const dubbed = {
+    videoDetails: { videoId: 'A' },
+    captions: {
+      playerCaptionsTracklistRenderer: {
+        captionTracks: [{ languageCode: 'en', kind: 'asr', baseUrl: 'x' }],
+        audioTracks: [
+          { audioTrackId: 'zh-Hant.4', captionTrackIndices: [0] },
+          { audioTrackId: 'en-US.10', captionTrackIndices: [0] },
+        ],
+        defaultAudioTrackIndex: 0,
+      },
+    },
+  };
+
+  it('默认音轨挂的字幕 + 音轨语言作兜底', () => {
+    // 这条视频只有英文 ASR：中文听写 YouTube 根本没给，所以我们只能拿到 en
+    expect(readOwnCaptionLangs(win(dubbed))).toEqual(['en', 'zh-hant']);
+    expect(readAudioTrackLang(win(dubbed))).toBe('zh-hant');
+  });
+
+  it('多音轨时只认默认音轨的 captionTrackIndices', () => {
+    const multi = {
+      videoDetails: { videoId: 'A' },
+      captions: {
+        playerCaptionsTracklistRenderer: {
+          captionTracks: [{ languageCode: 'en' }, { languageCode: 'ja', kind: 'asr' }],
+          audioTracks: [
+            { audioTrackId: 'en.1', captionTrackIndices: [0] },
+            { audioTrackId: 'ja.2', captionTrackIndices: [1] },
+          ],
+          defaultAudioTrackIndex: 1,
+        },
+      },
+    };
+    expect(readOwnCaptionLangs(win(multi))).toEqual(['ja']);
+  });
+
+  it('没有 audioTracks 时退回 defaultAudioLanguage', () => {
+    const plain = {
+      videoDetails: { videoId: 'A', defaultAudioLanguage: 'ja' },
+      captions: { playerCaptionsTracklistRenderer: { captionTracks: [{ languageCode: 'ja' }] } },
+    };
+    expect(readOwnCaptionLangs(win(plain))).toEqual(['ja']);
+    expect(readAudioTrackLang(win(plain))).toBe('ja');
+  });
+
+  it('音轨标注为 und（识别不出）时不当作语言', () => {
+    const und = {
+      videoDetails: { videoId: 'A' },
+      captions: {
+        playerCaptionsTracklistRenderer: {
+          captionTracks: [{ languageCode: 'en' }],
+          audioTracks: [{ audioTrackId: 'und', captionTrackIndices: [0] }],
+          defaultAudioTrackIndex: 0,
+        },
+      },
+    };
+    expect(readOwnCaptionLangs(win(und))).toEqual(['en']);
+  });
+
+  it('播放器响应还属于上一个视频时不采信', () => {
+    expect(readOwnCaptionLangs(win(dubbed), 'B')).toEqual([]);
+    expect(readAudioTrackLang(win(dubbed), 'B')).toBeNull();
   });
 });
 

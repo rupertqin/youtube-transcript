@@ -38,10 +38,9 @@ export function renderHighlighted(text: string, needle: string): DocumentFragmen
     }
     if (at > cursor) fragment.append(document.createTextNode(text.slice(cursor, at)));
     fragment.append(
-      h('mark', {
-        class: 'rounded-[3px] bg-[var(--ytt-highlight)] px-[1px] text-[var(--ytt-text)]',
-        text: text.slice(at, at + query.length),
-      }),
+      // 底色/圆角/跨行克隆都在 styles.css 的 mark.ytt-mark 里：
+      // 水平内边距写死在标签上会让相邻高亮块边缘对不齐
+      h('mark', { class: 'ytt-mark', text: text.slice(at, at + query.length) }),
     );
     cursor = at + query.length;
   }

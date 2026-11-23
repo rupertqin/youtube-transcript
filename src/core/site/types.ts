@@ -97,8 +97,16 @@ export interface SiteAdapter {
   storyboard(videoId: string): Promise<string | null>;
   /** 已归一化的可用字幕语言（`ai-zh` 归到 `zh-Hans`） */
   availableLangs(videoId: string): string[];
-  /** 用户偏好 → 本次抓取的语言方案 */
+  /** 用户偏好 → 本次抓取的语言方案（同步版，给 UI 用；轨道表没读到时不降级） */
   langPlan(): LangPlan;
+  /**
+   * 同上，但**先等语言表到手**再算。
+   *
+   * 读不到轨道信息的视频不能按「同音频」降级，也不能凭空相信用户的选择 ——
+   * 抓取与缓存读取都必须用同一份 plan，否则会出现「面板写着中文、缓存放的是英文」。
+   * 没实现时退回 `langPlan()`（B 站轨道来自接口，自己会等）。
+   */
+  resolvePlan?(videoId: string): Promise<LangPlan>;
   /** 当前语言选择（UI 高亮用；拿不到可用轨道时按 auto 处理） */
   choice(videoId: string): LangChoice;
 

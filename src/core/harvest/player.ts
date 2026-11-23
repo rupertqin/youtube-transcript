@@ -24,6 +24,12 @@ interface RawPlayerResponse {
       captionTracks?: RawTrack[];
       /** YouTube 允许机器翻译到的语言；有它才有「中/英」这类按钮的意义 */
       translationLanguages?: { languageCode?: string }[];
+      /**
+       * 音轨 ↔ 字幕轨的映射。多音轨视频（含 YouTube 自动配音）里，
+       * `captionTrackIndices` 才是**这条音轨自己的**字幕，别的音轨的字幕是别人翻的。
+       */
+      audioTracks?: { audioTrackId?: string; captionTrackIndices?: number[] }[];
+      defaultAudioTrackIndex?: number;
     };
   };
   playabilityStatus?: { status?: string; reason?: string };
@@ -188,6 +194,58 @@ export function readAvailableLangs(win: Window, expectedVideoId?: string): strin
     if (track.languageCode) seen.add(track.languageCode.toLowerCase());
   }
   return [...seen];
+}
+
+function captionRenderer(response: RawPlayerResponse | null) {
+  return response?.captions?.playerCaptionsTracklistRenderer ?? null;
+}
+
+/** 当前默认音轨的语言（`audioTrackId` 形如 `zh-Hant.4`）；推不出来就退回 defaultAudioLanguage。 */
+export function readAudioTrackLang(win: Window, expectedVideoId?: string): string | null {
+  const response = readPlayerResponse(win);
+  const declared = response?.videoDetails?.videoId;
+  if (expectedVideoId && declared && declared !== expectedVideoId) return null;
+
+  const renderer = captionRenderer(response);
+  const index = renderer?.defaultAudioTrackIndex ?? 0;
+  const id = renderer?.audioTracks?.[index]?.audioTrackId;
+  if (typeof id === 'string') {
+    const code = id.split('.')[0]?.toLowerCase();
+    // `und` = 识别不出来，别当成语言
+    if (code && code !== 'und') return code;
+  }
+  return response?.videoDetails?.defaultAudioLanguage?.toLowerCase() ?? null;
+}
+
+/**
+ * 「跟这条视频匹配」的字幕语言，按优先级排列。
+ *
+ * `同音频` 模式用它来决定先要哪条轨道 —— 而不是按浏览器语言。
+ * 否则中文浏览器打开日文视频会先去要中文（拿不到就机翻），
+ * 而不是视频自己那条日文听写。
+ *
+ * 依据：`audioTracks[defaultAudioTrackIndex].captionTrackIndices` 指向**这条音轨自己的**
+ * 字幕轨（多音轨/自动配音视频里，其它音轨的字幕是翻译品）；
+ * 再往后补上音轨本身的语言，供「听写缺失但同语言有别的轨」时兜底。
+ */
+export function readOwnCaptionLangs(win: Window, expectedVideoId?: string): string[] {
+  const response = readPlayerResponse(win);
+  const declared = response?.videoDetails?.videoId;
+  if (expectedVideoId && declared && declared !== expectedVideoId) return [];
+
+  const renderer = captionRenderer(response);
+  const tracks = Array.isArray(renderer?.captionTracks) ? renderer.captionTracks : [];
+  const index = renderer?.defaultAudioTrackIndex ?? 0;
+  const indices = renderer?.audioTracks?.[index]?.captionTrackIndices;
+
+  const picked: string[] = [];
+  for (const i of Array.isArray(indices) ? indices : []) {
+    const code = tracks[i]?.languageCode;
+    if (typeof code === 'string' && code) picked.push(code.toLowerCase());
+  }
+  const audioLang = readAudioTrackLang(win, expectedVideoId);
+  if (audioLang) picked.push(audioLang);
+  return [...new Set(picked)];
 }
 
 /**
