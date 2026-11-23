@@ -373,6 +373,11 @@ export function createYouTubeSite(options: YouTubeSiteOptions): SiteAdapter {
         complete: false,
       };
     };
+    // 兜底这条**跟着** skipSnapshot 一起关是刻意的：换台后的第一次抓取，
+    // 页面上那批行很可能还是上一个视频的，而 avoidSignature 比的是「可见窗口」
+    // 的指纹、清空时存的是「整条字幕」的指纹，两者几乎不可能相等 —— 靠它挡不住。
+    // 所以第一次宁可判失败也不冒「显示上一条视频字幕」的风险；
+    // 失败后 session 会自动重试，那一轮 switchPending 已消费，DOM 兜底自然复活。
     const readRenderedFull = async (): Promise<SourceOutcome | null> => {
       const result = await readRenderedTranscript(doc, domOptions());
       if (result.lines.length === 0) return null;

@@ -19,6 +19,24 @@ const STAGE_TEXT: Record<'player' | 'innertube' | 'intercept' | 'dom' | 'panel',
 /** 抓取上下文的语义见 `site/types.ts` 的 `SiteHarvestOptions`。 */
 export type HarvestOptions = SiteHarvestOptions;
 
+/**
+ * 失败后的自动重试节奏。
+ *
+ * 为什么必须有：整套抓取只跑一遍，而「进页面的第一次」恰好是 `ytcfg` /
+ * `playerResponse` / `#movie_player` 都可能还没就绪的时刻。以前一次失败就把
+ * 面板钉死在「抓取失败」，用户只能刷新页面（刷新重造状态、也让页面依赖就绪）。
+ * 抖一下 1-2 秒就好的问题，不该让人手动刷新。
+ */
+const RETRY_DELAYS_MS = [800, 2000];
+/**
+ * 「这个视频没有字幕轨道」只再给一次便宜的机会：
+ * 真正的无字幕视频重试也变不出来，但 SPA 切页瞬间的 `playerResponse`
+ * 还挂着上一条视频，这种「假的无轨道」一秒后就自愈了。
+ */
+const RETRY_DELAYS_NO_TRACK_MS = [1200];
+/** `loading` 卡这么久还没人跑 = 某次 load 被静默丢弃了，看门狗重新抓一次 */
+const STUCK_LOADING_MS = 8000;
+
 export interface SessionOptions {
   win: Window;
   /**
@@ -60,6 +78,16 @@ export function createSession(options: SessionOptions): Session {
   let inflight = 0;
   /** 下一次 load 是否发生在「视频刚切换」之后 */
   let switchPending = false;
+  /**
+   * 正在跑的 load 个数。0 = 空闲。
+   * 用来区分「真的在抓」和「状态停在 loading 但没人干活了」——后者只能靠看门狗救。
+   */
+  let running = 0;
+  let lastLoadAt = 0;
+  /** 待执行的重试定时器（同一时刻只留一个） */
+  let retryTimer = 0;
+  /** 本轮失败重试的进度；换视频或抓成功就清空 */
+  let retry: { videoId: string; attempts: number } | null = null;
   /**
    * 切换前那条视频的内容指纹。
    *
@@ -176,10 +204,42 @@ export function createSession(options: SessionOptions): Session {
     }
   };
 
-  const load = async (force = false): Promise<void> => {
+  /**
+   * 失败后按节奏重试一次。
+   *
+   * 只有「可能自己好」的失败才值得重试：网络抖动、空响应、播放器还没切过来。
+   * 定时到点前会重新确认一次状态 —— 期间换了视频、已经成功、或用户手动重抓过，
+   * 这次定时就作废，绝不把旧视频的抓取结果写到现在这条视频上。
+   */
+  const scheduleRetry = (videoId: string, code: ErrorCode): void => {
+    const attempts = retry?.videoId === videoId ? retry.attempts : 0;
+    const delays = code === 'NO_CAPTION_TRACK' ? RETRY_DELAYS_NO_TRACK_MS : RETRY_DELAYS_MS;
+    if (attempts >= delays.length) return;
+
+    retry = { videoId, attempts: attempts + 1 };
+    const delay = delays[attempts];
+    if (retryTimer) win.clearTimeout(retryTimer);
+    retryTimer = win.setTimeout(() => {
+      retryTimer = 0;
+      const now = store.getState();
+      if (now.videoId !== videoId || now.status !== 'error') return;
+      log({ code: 'UNKNOWN', source: 'host', detail: `自动重试第 ${attempts + 1} 次（${code}）` });
+      void load();
+    }, delay);
+  };
+
+  const runLoad = async (force = false): Promise<void> => {
     const state = store.getState();
     const videoId = state.videoId;
     if (!videoId) return;
+
+    // 新的抓取开始了：之前排的重试作废（否则会和这一轮抢写状态）
+    if (retryTimer) {
+      win.clearTimeout(retryTimer);
+      retryTimer = 0;
+    }
+    // 用户手动重试 / 换语言：重试预算重新开始
+    if (force) retry = null;
 
     // 只对「切页后的第一次抓取」生效：此时页面里可能还留着上一个视频的行。
     // 重试（force）时面板已按当前视频重建过，正常走快照即可。
@@ -209,7 +269,7 @@ export function createSession(options: SessionOptions): Session {
           detail: `丢弃不属于 ${videoId} 的缓存：末条 ${cached.lines[cached.lines.length - 1]?.start}ms 超出视频时长`,
         });
         await dropCacheEntry(cached.key);
-        return load(force);
+        return runLoad(force);
       }
 
       if (cached) {
@@ -241,6 +301,7 @@ export function createSession(options: SessionOptions): Session {
           updatedAt: Date.now(),
         });
         log({ code: 'OK', source: 'cache', meta: { lines: cached.lines.length } });
+        retry = null;
         return;
       }
     }
@@ -294,6 +355,7 @@ export function createSession(options: SessionOptions): Session {
       if (signal.aborted || run !== inflight) return;
       if (result.lines.length === 0) throw Object.assign(new Error('empty transcript'), { code: 'NO_CAPTION_TRACK' });
       await applyResult(videoId, result, { staleRisk });
+      retry = null;
     } catch (error) {
       if (signal.aborted || run !== inflight) return;
       const code = (error as { code?: ErrorCode }).code ?? 'UNKNOWN';
@@ -323,6 +385,22 @@ export function createSession(options: SessionOptions): Session {
         updatedAt: Date.now(),
       });
       log({ code, source: 'host', detail: String((error as Error).message) });
+      // 先把错误摆出来（用户能立刻看到并手动重试），再在后台自动重试一次
+      scheduleRetry(videoId, code);
+    }
+  };
+
+  /**
+   * 对外只暴露这一个 load：包一层是为了让看门狗知道「有没有人在干活」。
+   * 内部所有真正的逻辑都在 runLoad，它自己还会因为缓存串台而递归一次。
+   */
+  const load = async (force = false): Promise<void> => {
+    running += 1;
+    lastLoadAt = Date.now();
+    try {
+      await runLoad(force);
+    } finally {
+      running -= 1;
     }
   };
 
@@ -340,6 +418,11 @@ export function createSession(options: SessionOptions): Session {
     if (!videoId) {
       if (current.videoId) {
         controller?.abort();
+        if (retryTimer) {
+          win.clearTimeout(retryTimer);
+          retryTimer = 0;
+        }
+        retry = null;
         store.setState({ ...emptyPanelState(''), site: site.id, status: 'idle' });
         site.onNavigate?.(null);
       }
@@ -357,6 +440,14 @@ export function createSession(options: SessionOptions): Session {
       const langs = site.availableLangs(videoId);
       if (langs.length !== current.availableLangs.length || langs.some((l, i) => l !== current.availableLangs[i])) {
         store.setState({ availableLangs: langs });
+      }
+
+      // 看门狗：状态写着「正在抓取」，但实际上没有任何 load 在跑。
+      // 这种情况来自 load() 里那些「被新代次抢走就静默 return」的分支 ——
+      // 它们不写状态，面板就会永久停在骨架上（刷新才能好）。
+      if (current.status === 'loading' && running === 0 && Date.now() - lastLoadAt > STUCK_LOADING_MS) {
+        log({ code: 'UNKNOWN', source: 'host', detail: '抓取状态卡住，重新抓一次' });
+        void load();
       }
       return;
     }
@@ -385,6 +476,12 @@ export function createSession(options: SessionOptions): Session {
     }
 
     controller?.abort();
+    // 换视频了：上一条视频排着的重试必须作废，否则它会把旧视频的结果抓回来
+    if (retryTimer) {
+      win.clearTimeout(retryTimer);
+      retryTimer = 0;
+    }
+    retry = null;
     // 章节先清空：此刻读到的必然是上一个视频的章节，
     // 由 load() 在 videoId 对齐后重新填充
     store.setState({
@@ -484,6 +581,9 @@ export function createSession(options: SessionOptions): Session {
     dispose() {
       if (reconcileTimer) win.clearInterval(reconcileTimer);
       reconcileTimer = 0;
+      if (retryTimer) win.clearTimeout(retryTimer);
+      retryTimer = 0;
+      retry = null;
       controller?.abort();
       win.document.removeEventListener('timeupdate', onTimeUpdate, true);
     },

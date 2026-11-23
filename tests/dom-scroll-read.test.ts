@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { readRenderedTranscript } from '../src/core/dom/native-panel';
+import { readDomPreview, readRenderedTranscript } from '../src/core/dom/native-panel';
+import { contentSignature } from '../src/core/format/fingerprint';
 
 /**
  * 真实缺陷：虚拟列表只渲染视口附近的行，同步读一次常常只剩播放位置那一段
@@ -68,5 +69,33 @@ describe('readRenderedTranscript：滚动读全，不再漏前段', () => {
     await readRenderedTranscript(doc);
 
     expect(scroller.scrollTop).toBe(before);
+  });
+});
+
+describe('skipSnapshot 与内容指纹闸门', () => {
+  it('skipSnapshot 时一条都不读（换台首抓宁可判失败，交给自动重试）', async () => {
+    const skipped = await readRenderedTranscript(doc, { skipSnapshot: true });
+    expect(skipped.lines).toHaveLength(0);
+
+    // 去掉这个开关（重试那一轮 switchPending 已消费）才读页面上的内容
+    const allowed = await readRenderedTranscript(doc, { avoidSignature: null });
+    expect(allowed.lines.length).toBeGreaterThan(0);
+  });
+
+  it('指纹闸门只覆盖「可见窗口」，挡不住整条字幕的指纹', () => {
+    const window = readDomPreview(doc);
+    expect(window.lines.length).toBeGreaterThan(0);
+
+    // 同一批行：挡得住
+    const blocked = readDomPreview(doc, { avoidSignature: contentSignature(window.lines) });
+    expect(blocked.lines).toHaveLength(0);
+
+    // 但 session 存的是「整条字幕」的指纹，虚拟列表里窗口只是其中一段 → 挡不住。
+    // 这就是换台首抓不能放开 DOM 兜底的原因。
+    const whole = contentSignature(
+      ALL.map((row) => ({ start: row.start, dur: 0, text: row.text })),
+    );
+    const leaked = readDomPreview(doc, { avoidSignature: whole });
+    expect(leaked.lines.length).toBeGreaterThan(0);
   });
 });
