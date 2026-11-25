@@ -10,7 +10,7 @@ export default defineConfig({
   outDir: 'dist',
   outDirTemplate: 'extension',
   manifest: {
-    name: 'Transcript Studio',
+    name: 'Transcript',
     description:
       'Extract, search and export transcripts from supported video sites. Works from the side panel or an in-page card.',
     permissions: ['storage', 'sidePanel'],
@@ -25,7 +25,7 @@ export default defineConfig({
       'https://i1.hdslb.com/*',
     ],
     action: {
-      default_title: 'Transcript Studio',
+      default_title: 'Transcript',
       default_icon: {
         16: 'icon/16.png',
         32: 'icon/32.png',
@@ -41,7 +41,7 @@ export default defineConfig({
     },
   },
   vite: () => ({
-    define: { __TRANSCRIPT_STUDIO_VERSION__: JSON.stringify(pkg.version) },
+    define: { __TRANSCRIPT_VERSION__: JSON.stringify(pkg.version) },
     plugins: [tailwindcss()],
     build: {
       target: 'chrome111',

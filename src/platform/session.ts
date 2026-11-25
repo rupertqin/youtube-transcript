@@ -377,7 +377,7 @@ export function createSession(options: SessionOptions): Session {
         // 诊断文本首行印版本号：复制文本发出来就能立刻确认跑的是哪一版
         diagnostic:
           [
-            `脚本版本: v${typeof __TRANSCRIPT_STUDIO_VERSION__ === 'string' ? __TRANSCRIPT_STUDIO_VERSION__ : 'dev'}`,
+            `脚本版本: v${typeof __TRANSCRIPT_VERSION__ === 'string' ? __TRANSCRIPT_VERSION__ : 'dev'}`,
             site.diagnostic() ?? '',
           ]
             .filter((line) => line.length > 0)

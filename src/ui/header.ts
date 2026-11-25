@@ -21,7 +21,7 @@ export interface HeaderHandle {
 export function createHeader(options: HeaderOptions): HeaderHandle {
   const titleEl = h('p', {
     class: 'truncate text-[15px] font-medium leading-[20px] text-[var(--ytt-text)]',
-    text: 'Transcript Studio',
+    text: 'Transcript',
   });
   const subtitleEl = h('p', {
     class: 'truncate text-[12px] leading-[16px] text-[var(--ytt-text-mute)]',

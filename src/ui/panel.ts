@@ -518,7 +518,7 @@ export function createPanel(options: PanelOptions): PanelHandle {
       }),
     );
 
-    header.setTitle(switchingNow ? '正在切换到新视频…' : state.title || 'Transcript Studio');
+    header.setTitle(switchingNow ? '正在切换到新视频…' : state.title || 'Transcript');
     header.setSubtitle(switchingNow ? '同步中…' : subtitleText());
     statusBar.update(state, pageId);
 

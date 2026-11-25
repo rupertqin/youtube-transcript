@@ -1,4 +1,4 @@
-# Transcript Studio
+# Transcript
 
 一个常驻的字幕工作台，同时产出 **Chrome MV3 扩展** 与 **Tampermonkey 脚本**，两端共享同一套核心代码与 UI。
 
@@ -181,7 +181,7 @@ npm run build:ext
 npm run build:userscript
 ```
 
-把 `dist/userscript/transcript-studio.user.js` 拖进 Tampermonkey 的安装页（或直接打开该文件）。meta 头 `@match` 了所有已支持的视频站点；脚本 `@grant none`，本身运行在页面上下文，不需要任何 GM\_ API。
+把 `dist/userscript/transcript.user.js` 拖进 Tampermonkey 的安装页（或直接打开该文件）。meta 头 `@match` 了所有已支持的视频站点；脚本 `@grant none`，本身运行在页面上下文，不需要任何 GM\_ API。
 
 ## 开发
 

@@ -11,8 +11,8 @@ const pkg = JSON.parse(
  * 与扩展端共用 src/core + src/ui，唯一差别是这里不拆 world（脚本本身跑在页面上下文）。
  */
 const meta = `// ==UserScript==
-// @name         Transcript Studio
-// @namespace    https://github.com/transcript-studio
+// @name         Transcript
+// @namespace    https://github.com/transcript
 // @version      ${pkg.version}
 // @description  Extract, search and export transcripts from supported video sites.
 // @match        https://www.youtube.com/*
@@ -26,7 +26,7 @@ const meta = `// ==UserScript==
 /** rolldown 下 output.banner 不稳定，统一在 generateBundle 里塞 meta 头 */
 function userscriptBanner(text: string): Plugin {
   return {
-    name: 'transcript-studio-userscript-banner',
+    name: 'transcript-userscript-banner',
     enforce: 'post',
     generateBundle(_options, bundle) {
       for (const output of Object.values(bundle)) {
@@ -41,7 +41,7 @@ export default defineConfig({
   publicDir: false,
   define: {
     'process.env.NODE_ENV': '"production"',
-    __TRANSCRIPT_STUDIO_VERSION__: JSON.stringify(pkg.version),
+    __TRANSCRIPT_VERSION__: JSON.stringify(pkg.version),
   },
   build: {
     outDir: 'dist/userscript',
@@ -51,9 +51,9 @@ export default defineConfig({
     minify: true,
     lib: {
       entry: 'userscript/main.ts',
-      name: 'TranscriptStudio',
+      name: 'Transcript',
       formats: ['iife'],
-      fileName: () => 'transcript-studio.user.js',
+      fileName: () => 'transcript.user.js',
     },
   },
 });
