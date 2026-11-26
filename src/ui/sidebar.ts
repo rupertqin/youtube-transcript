@@ -101,6 +101,11 @@ export interface SidebarPanelOptions {
   height?: string;
   /** 宿主与右栏顶部的间距；B 站右栏默认贴顶，站点适配器会传一个正值 */
   topGap?: string;
+  /**
+   * 「现在能不能往页面里插节点」。B 站（Vue SSR + hydration）必须给：
+   * 框架就位前插进去的节点会让它的 app 崩掉。返回 false 就等下一轮。
+   */
+  canInsert?: () => boolean;
 }
 
 export interface SidebarPanelHandle {
@@ -164,7 +169,9 @@ export function createSidebarPanel(options: SidebarPanelOptions): SidebarPanelHa
     el.id = SIDEBAR_HOST_ID;
     // 宽度交给右栏；topGap 由站点决定（B 站右栏贴顶，需要留白），
     // margin-bottom 与下方「相关视频」拉开距离
-    el.style.cssText = `display:block;width:100%;margin:${options.topGap ?? '0'} 0 12px 0;`;
+    // pointer-events:auto 不能省：B 站给 .right-container-inner 设了 none，
+    // 只在它自己的卡片上重新打开，我们的宿主会跟着继承成「点不动」。
+    el.style.cssText = `display:block;width:100%;margin:${options.topGap ?? '0'} 0 12px 0;pointer-events:auto;`;
     const shadow = el.attachShadow({ mode: 'open' });
     const style = doc.createElement('style');
     style.textContent = css;
@@ -222,6 +229,9 @@ export function createSidebarPanel(options: SidebarPanelOptions): SidebarPanelHa
       if (host?.parentNode) host.parentNode.removeChild(host);
       return false;
     }
+
+    // 站点框架还没就位就插，会把它的 app 搞崩（B 站 = 页头/登录态消失）
+    if (host?.parentNode !== mount && options.canInsert && !options.canInsert()) return false;
 
     const fresh = !host || host.parentNode !== mount;
     if (!host) host = buildHost();

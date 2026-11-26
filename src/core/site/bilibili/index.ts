@@ -37,6 +37,26 @@ async function surfaceBiliFailure(result: Promise<HarvestResult>): Promise<Harve
   }
 }
 
+/**
+ * 「现在能不能往 B 站页面里插节点」。
+ *
+ * 视频页是 SSR + Vue hydration：`[data-server-rendered]` 是 Vue 在 patch **一开始**
+ * 就删掉的属性，之后它还要几百毫秒才真正接管完 DOM。在这之间插节点，B 站自己会抛
+ * `HierarchyRequestError`，页头连同登录态一起失效。所以等「属性消失 + load 完成 +
+ * 静置 1s」；属性迟迟不消失时 6s 兜底，避免 UI 永远被挡住。
+ */
+export function createSettleGate(doc: Document, now: () => number = Date.now): () => boolean {
+  let loadedAt: number | null = null;
+  let settledAt: number | null = null;
+  return () => {
+    if (doc.readyState !== 'complete') return false;
+    loadedAt ??= now();
+    if (doc.querySelector('[data-server-rendered]')) return now() - loadedAt >= 6000;
+    settledAt ??= now();
+    return now() - settledAt >= 1000;
+  };
+}
+
 export interface BilibiliSiteOptions {
   win: Window;
   doc: Document;
@@ -258,7 +278,7 @@ export function createBilibiliSite(options: BilibiliSiteOptions): SiteAdapter {
     },
 
     mount(input: SiteMountInput): SitePanelHandle {
-      // 与 YouTube 同一套交互：一个入口按钮 + 一个右栏卡片。
+      // 与 YouTube 同一套交互：一个入口按钮 + 一个右栏卡片（按钮在卡片上方）。
       // 只有抓取在背后按站点分开（这里走 WBI + 页面兜底），UI 不再有浮层分支。
       return createSidebarWithEntryButton({
         doc: input.doc,
@@ -269,6 +289,7 @@ export function createBilibiliSite(options: BilibiliSiteOptions): SiteAdapter {
         // B 站右栏比 YouTube 窄，卡片矮一些；右栏本身贴顶，留一点上边距
         height: 'min(560px, 70vh)',
         topGap: '12px',
+        canInsert: createSettleGate(input.doc),
       });
     },
   };

@@ -19,7 +19,7 @@ B 站字幕接口要求登录态：匿名时可能返回**空轨道列表**而�
 
 B 站轨道不只靠 `type` 判断来源：综合 `lan` 的 `ai-` 前缀、字幕 CDN 域名、`ai_status` / `is_ai` 等字段，并用 `view.subtitle.list` 给 `player/wbi/v2` 的轨道补线索；底栏会显示「中文（中国）（人工 / AI）」。默认优先级是**人工中文 → 人工任意 → 未知来源中文 → AI**。
 
-页面是 SSR + Vue hydration：入口按钮会等 `[data-server-rendered]` 消失后再插入 header，并用 `MutationObserver` 处理 hydration 结束与 SPA 重建，避免把 B 站原生页头冲乱。
+页面是 SSR + Vue hydration：入口按钮和卡片都在右栏（按钮在卡片正上方），插入前要等 `[data-server-rendered]` 消失、文档加载完，再静置 1s（`createSettleGate`）—— 提前插节点会让 B 站自己的 app 抛 `HierarchyRequestError`，页头（登录态）跟着失效。
 
 油猴产物保持 `@grant none`（一旦声明任何 `@grant`，Tampermonkey 会把脚本沙箱化，YouTube 的 `getPlayerResponse()` / fetch hook / 主动切轨全部失效）。因此 B 站走页面上下文 `fetch(..., { credentials: 'include' })`；扩展端则靠 `host_permissions` 拿 CORS 豁免。产物文件名与 `@name` 保持不变，方便已有安装直接更新。
 
@@ -37,7 +37,7 @@ B 站轨道不只靠 `type` 判断来源：综合 `lan` 的 `ai-` 前缀、字�
 
 ## 一个站点一个入口
 
-每个站点页面上只有**一个**按钮和一个面板：两个按钮都只显示「字」logo + 展开/收起箭头（无文案、无版本号）。YouTube 的 `ytt-entry-btn` 在 masthead；B 站的 `ytt-float-btn` 是 `<ul class="right-entry">` 里与投稿同级的 `<li>`，插在 `.right-entry-item--upload` 前面；卡片则放在 `#mirror-vdcon > .right-container-inner`。按钮只 toggle 这张卡片，没有右栏时不弹第二界面。
+每个站点页面上只有**一个**按钮和一个面板：两个按钮都只显示「字」logo + 展开/收起箭头（无文案、无版本号）。YouTube 的 `ytt-entry-btn` 在 masthead；B 站的 `ytt-float-btn` 在右栏、卡片正上方（容器 `#ytt-float-mount`），卡片放在 `#mirror-vdcon > .right-container-inner`。按钮只 toggle 这张卡片，没有右栏时不弹第二界面。
 
 **按钮显隐跟着「页面有没有视频」走，不靠单次回调**：YouTube 端每 800ms 用
 `entryButtonAction()` 对一次账（`hasVideo` + 按钮在不在文档里）：
